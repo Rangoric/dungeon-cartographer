@@ -1,0 +1,9 @@
+{
+	"id": "dungeon-cartographer",
+	"name": "Dungeon Cartographer",
+	"version": "0.1.0",
+	"minAppVersion": "0.15.0",
+	"description": "Visual dungeon map renderer for D&D campaign management.",
+	"author": "Campaign Tools",
+	"isDesktopOnly": true
+}
