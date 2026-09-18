@@ -4,6 +4,7 @@ import { createFloor2DView, renderFloorToSvgString, type Floor2DView } from "./f
 import { generateFloor, configFromFloorSetup } from "./generate";
 import { parseFloorSetup, DEFAULT_FLOOR_SETUP, type FloorSetup } from "./floorSetup";
 import { copySettingsDefaults } from "./settingsSync";
+import { SETTINGS_DEFAULT_FILES } from "./settingsDefaults";
 
 // 2026-09-05: the 3D Three.js viewer (OrbitControls, WebGLRenderer, the
 // whole scene-graph approach) is retired in favor of a flat top-down SVG
@@ -461,14 +462,8 @@ export default class DungeonCartographerPlugin extends Plugin {
    * edited there needs to be backed up (git/sync history) beforehand.
    */
   private async resetSettingsToDefaults(): Promise<void> {
-    const pluginDir = this.manifest.dir;
-    if (!pluginDir) {
-      new Notice("Dungeon Cartographer: couldn't resolve the plugin's own folder.");
-      return;
-    }
-
     try {
-      const copied = await copySettingsDefaults(this.app.vault.adapter, pluginDir);
+      const copied = await copySettingsDefaults(this.app.vault.adapter, SETTINGS_DEFAULT_FILES);
       new Notice(`Dungeon Cartographer: reset ${copied.length} settings file${copied.length === 1 ? "" : "s"} to defaults.`);
     } catch (err) {
       console.error(err);

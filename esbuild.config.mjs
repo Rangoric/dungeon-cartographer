@@ -14,6 +14,15 @@ const context = await esbuild.context({
   banner: { js: banner },
   entryPoints: ["src/main.ts"],
   bundle: true,
+  // Settings-defaults files (Dungeon Cartographer Settings/*.md, *.base) are
+  // imported as raw text and baked into main.js - see settingsDefaults.ts.
+  // Needed because BRAT and Obsidian's own installer only ever fetch
+  // main.js/manifest.json/styles.css from a release, never any sibling
+  // folder shipped alongside them (confirmed against BRAT's dev guide,
+  // 2026-09-18) - a plain on-disk defaults folder only worked in the dev
+  // vault, where this repo happens to be checked out directly into the
+  // installed plugin's own folder.
+  loader: { ".md": "text", ".base": "text" },
   // 2026-09-05: `three` used to be bundled in here (the dungeon view was a
   // Three.js scene) - it's gone now that the view is a flat SVG renderer,
   // see "2D Rendering Plan.md" rollout step 6. Only the Obsidian runtime +

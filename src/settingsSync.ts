@@ -6,6 +6,18 @@
 // protection). Manual-only - this only ever runs via the "Reset Settings
 // to Defaults" command (`main.ts`), never automatically on load.
 //
+// Originally read the plugin's own installed folder at runtime
+// (`adapter.list`/`adapter.read` on a sibling "Dungeon Cartographer
+// Settings/" directory) - dropped 2026-09-18 after confirming BRAT and
+// Obsidian's own plugin installer only ever fetch main.js/manifest.json/
+// styles.css from a release, never any other file. A plain on-disk
+// defaults folder only ever worked in the dev vault, where this repo
+// happens to be checked out directly into the installed plugin's own
+// folder - anywhere else (BRAT, manual install, the community store) that
+// folder simply never arrives, and `adapter.list` on it threw ENOENT. The
+// defaults now travel as bundled text inside main.js instead (see
+// settingsDefaults.ts) - install-method-agnostic by construction.
+//
 // Takes a plain adapter-shaped interface rather than importing `obsidian`
 // so this stays unit-testable without the plugin's minimal obsidian mock
 // (`test/mocks/obsidian.ts`) needing to grow adapter methods it doesn't
@@ -17,32 +29,25 @@ export const SETTINGS_FOLDER_NAME = "Dungeon Cartographer Settings";
 export interface SettingsAdapter {
   exists(path: string): Promise<boolean>;
   mkdir(path: string): Promise<void>;
-  list(path: string): Promise<{ files: string[]; folders: string[] }>;
-  read(path: string): Promise<string>;
   write(path: string, data: string): Promise<void>;
 }
 
 /**
- * Walks the plugin-shipped defaults folder (`<pluginDir>/Dungeon
- * Cartographer Settings/`) and writes each file it contains into
- * `Dungeon Cartographer Settings/` at the vault root, creating that
- * folder first if it doesn't exist yet. Flat copy only - the settings
- * folder has no subfolders of its own. Returns the list of file names
- * copied, for the confirmation Notice.
+ * Writes every file in `defaults` (file name -> contents) into `Dungeon
+ * Cartographer Settings/` at the vault root, creating that folder first
+ * if it doesn't exist yet. Always overwrites. Returns the list of file
+ * names written, for the confirmation Notice.
  */
-export async function copySettingsDefaults(adapter: SettingsAdapter, pluginDir: string): Promise<string[]> {
-  const defaultsPath = `${pluginDir}/${SETTINGS_FOLDER_NAME}`;
-
+export async function copySettingsDefaults(
+  adapter: SettingsAdapter,
+  defaults: Record<string, string>
+): Promise<string[]> {
   if (!(await adapter.exists(SETTINGS_FOLDER_NAME))) {
     await adapter.mkdir(SETTINGS_FOLDER_NAME);
   }
 
-  const { files } = await adapter.list(defaultsPath);
   const copied: string[] = [];
-
-  for (const filePath of files) {
-    const fileName = filePath.slice(defaultsPath.length + 1);
-    const contents = await adapter.read(filePath);
+  for (const [fileName, contents] of Object.entries(defaults)) {
     await adapter.write(`${SETTINGS_FOLDER_NAME}/${fileName}`, contents);
     copied.push(fileName);
   }
