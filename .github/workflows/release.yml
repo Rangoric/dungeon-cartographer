@@ -24,6 +24,7 @@ jobs:
             main.js
             styles.css
             manifest.json
+            Dungeon Cartographer Settings/*
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -32,3 +33,4 @@ jobs:
             main.js
             manifest.json
             styles.css
+            Dungeon Cartographer Settings/*

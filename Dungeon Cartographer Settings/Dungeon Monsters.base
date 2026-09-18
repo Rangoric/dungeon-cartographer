@@ -12,10 +12,12 @@ views:
             - note.terrain_hex.contains("Any")
     order:
       - file.name
-      - note.Challenge_Rating
-      - note.Type
-      - note.Size
-      - note.terrain_hex
+      - Challenge_Rating
+      - Type
+      - Size
+      - terrain_hex
     sort:
-      - property: note.Challenge_Rating
+      - property: file.name
+        direction: ASC
+      - property: Challenge_Rating
         direction: ASC
