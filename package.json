@@ -1,6 +1,6 @@
 {
   "name": "dungeon-cartographer",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "2D top-down dungeon map viewer/generator for Obsidian",
   "main": "main.js",
   "type": "module",
