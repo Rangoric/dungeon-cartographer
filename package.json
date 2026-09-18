@@ -1,7 +1,7 @@
 {
   "name": "dungeon-cartographer",
   "version": "0.1.0",
-  "description": "3D dungeon viewer for Obsidian (Three.js)",
+  "description": "2D top-down dungeon map viewer/generator for Obsidian",
   "main": "main.js",
   "type": "module",
   "scripts": {
@@ -13,22 +13,18 @@
   },
   "keywords": [
     "obsidian",
-    "three.js",
-    "dungeon"
+    "dungeon",
+    "svg"
   ],
   "author": "Campaign Tools",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "@types/three": "^0.169.0",
     "@vitest/coverage-v8": "^4.1.9",
     "esbuild": "^0.21.5",
     "obsidian": "latest",
     "tslib": "^2.6.3",
     "typescript": "^5.4.5",
     "vitest": "^4.1.9"
-  },
-  "dependencies": {
-    "three": "^0.169.0"
   }
 }

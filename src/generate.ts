@@ -146,6 +146,14 @@ export interface GenerateConfig {
   specialKinds: string[]; // optional per-dungeon special rooms, e.g. ["boss"]
   doorMaterials: string[];
   secretDoorChance: number;
+  // Door-quality rolls added 2026-09-05 (see Physical vs Content Split.md's
+  // amendment and 2D Rendering Plan.md) - three independent per-door rolls,
+  // not mutually exclusive with each other or with secretDoorChance. A
+  // starting point to tune once seen on a real generated floor, same as
+  // secretDoorChance above.
+  lockedDoorChance: number;
+  trappedDoorChance: number;
+  stuckDoorChance: number;
   stairCountRange: [number, number];
   stairEmbeddedChance: number; // embedded in a room vs. freestanding terminus
   spiralStairChance: number; // spiral vs. regular/straight
@@ -176,6 +184,10 @@ export const DEFAULT_GENERATE_CONFIG: Omit<GenerateConfig, "gridWidth" | "gridDe
   specialKinds: [],
   doorMaterials: ["wood", "metal", "stone"],
   secretDoorChance: 0.05,
+  // 1-in-3, 1-in-3, 1-in-6 - set 2026-09-05, independent rolls.
+  lockedDoorChance: 1 / 3,
+  trappedDoorChance: 1 / 3,
+  stuckDoorChance: 1 / 6,
   stairCountRange: [1, 2],
   stairEmbeddedChance: 0.5,
   spiralStairChance: 0.4,
@@ -183,7 +195,7 @@ export const DEFAULT_GENERATE_CONFIG: Omit<GenerateConfig, "gridWidth" | "gridDe
   extraEntranceCountRange: [0, 0],
 };
 
-/** Builds a full `GenerateConfig` from a floor's parsed Setup file (grid size), filling in every other confirmed default. */
+/** Builds a full `GenerateConfig` from a floor's parsed Setup file (grid size), filling in every other confirmed default. `setup.level` is deliberately NOT mapped here - it's content-layer input (see FloorSetup's doc comment and Dungeon Generation/Rules/Lock, Trap & Stuck Door DCs.md), not a physical-generation knob. */
 export function configFromFloorSetup(setup: FloorSetup, overrides: Partial<GenerateConfig> = {}): GenerateConfig {
   return {
     ...DEFAULT_GENERATE_CONFIG,
@@ -398,6 +410,9 @@ interface GenDoor {
   material: string;
   secret: boolean;
   width: number;
+  locked: boolean;
+  trapped: boolean;
+  stuck: boolean;
 }
 
 interface GenStair {
@@ -817,7 +832,9 @@ function findRoute(
   windy: boolean,
   rng: Rng,
   maxCost: number,
-  firstStepAwayPenaltyDir?: [number, number]
+  firstStepAwayPenaltyDir?: [number, number],
+  sourceStartCost?: (source: LaunchPoint) => number,
+  targetExtraCost?: ReadonlyMap<string, number>
 ): RouteResult | null {
   const jitter = new Map<string, number>();
   const jitterFor = (x: number, y: number): number => {
@@ -839,9 +856,10 @@ function findRoute(
     const [x, y] = s.cell;
     const key = cellKey(x, y);
     if (blocked.has(key) || bestCost.has(key)) continue;
-    bestCost.set(key, 0);
+    const startCost = sourceStartCost ? sourceStartCost(s) : 0;
+    bestCost.set(key, startCost);
     isSource.set(key, s);
-    frontier.push({ x, y, dir: s.dir, cost: 0 });
+    frontier.push({ x, y, dir: s.dir, cost: startCost });
   }
 
   let foundKey: string | null = null;
@@ -870,6 +888,7 @@ function findRoute(
       if (firstStepAwayPenaltyDir && current.cost === 0 && dx === firstStepAwayPenaltyDir[0] && dy === firstStepAwayPenaltyDir[1]) {
         stepCost += 6; // orientation rule: bias a width-1 branch off a 10' door away from running straight out
       }
+      if (targetExtraCost) stepCost += targetExtraCost.get(nkey) ?? 0;
       const newCost = current.cost + stepCost;
       if (newCost < (bestCost.get(nkey) ?? Infinity)) {
         bestCost.set(nkey, newCost);
@@ -1030,6 +1049,278 @@ function doorAtLaunchPoint(point: LaunchPoint, room: GenRoom, rng: Rng): { width
   };
 }
 
+// ---------------------------------------------------------------------------
+// Door spacing - 2026-09-13. Every corridor branch (mandatory-connect,
+// growLoops, growSpurs) rolls and places its own door independently, with
+// nothing checking how close it lands to a door some OTHER branch already
+// put on the same room wall - confirmed by spot-checking generated maps to
+// sometimes produce 2-3 independently-rolled doors touching (or one
+// WALL_GAP cell apart), each with its own material/secret/locked/trapped/
+// stuck roll, reading as visually mismatched neighbors instead of one
+// opening. Two-part fix: bias new branches away from a room's existing
+// doors before routing (below), then clean up whatever still lands close
+// anyway (`mergeAdjacentDoors`, near `pruneDeadEnds`) - the bias makes it
+// rare, not impossible, same "no choice, fall back to what's left" spirit
+// as every other placement guard in this file.
+// ---------------------------------------------------------------------------
+
+/** A door's footprint along the one room wall it actually sits on. */
+interface DoorWallSpan {
+  crossesX: boolean;
+  /** The coordinate that stays constant along this wall - x for an east/west-facing door, y for a north/south one. */
+  fixed: number;
+  /** Inclusive start/end of the door's span along the wall's other axis. */
+  lo: number;
+  hi: number;
+}
+
+/** Loose shape covering both `GenDoor` (pre-export) and `DungeonDoor` (exported) - the span math only needs these fields, and works identically on either. */
+interface DoorLike {
+  connects: [{ kind: string; id: number }, { kind: string; id: number }];
+  cellA: [number, number, number];
+  cellB: [number, number, number];
+  width: number;
+}
+
+interface RoomBoxLike {
+  id: number;
+  x: number;
+  y: number;
+  w: number;
+  d: number;
+}
+
+/**
+ * The span `door` occupies on `room`'s own wall, or null if `door` doesn't
+ * actually have a room-side cell inside `room`'s box. A freestanding
+ * stair's placeholder door reuses the room's own id on BOTH `connects`
+ * entries (see `addStairs`) since it has no real second room - but only
+ * `cellA` genuinely sits on the room's boundary (`cellB` is 2 cells out,
+ * where the stair box sits), so this still correctly returns exactly one
+ * span for it, not a phantom second one.
+ */
+function doorWallSpanOnRoom(door: DoorLike, room: RoomBoxLike): DoorWallSpan | null {
+  const cells: [number, number, number][] = [door.cellA, door.cellB];
+  for (let i = 0; i < 2; i++) {
+    const end = door.connects[i];
+    if (end.kind !== "room" || end.id !== room.id) continue;
+    const [cx, cy] = cells[i];
+    if (cx < room.x || cx >= room.x + room.w || cy < room.y || cy >= room.y + room.d) continue;
+    const crossesX = door.cellA[0] !== door.cellB[0];
+    const width = Math.max(1, Math.round(door.width || 1));
+    // Width always extends in the +y (crossesX) / +x (!crossesX) direction
+    // from the boundary cell - same convention `doorAtLaunchPoint`'s
+    // `available` check and `doorGapCells()` (dungeonData.ts) both use.
+    return crossesX ? { crossesX, fixed: cx, lo: cy, hi: cy + width - 1 } : { crossesX, fixed: cy, lo: cx, hi: cx + width - 1 };
+  }
+  return null;
+}
+
+/** Wall-cell gap between two spans on the SAME wall - 0 = touching, 1 = a single WALL_GAP cell between. Null if they're not on the same wall, or overlap (shouldn't normally happen). */
+function wallSpanGap(a: DoorWallSpan, b: DoorWallSpan): number | null {
+  if (a.crossesX !== b.crossesX || a.fixed !== b.fixed) return null;
+  if (a.hi < b.lo) return b.lo - a.hi - 1;
+  if (b.hi < a.lo) return a.lo - b.hi - 1;
+  return null;
+}
+
+/** Every existing door's wall span on `room`, for biasing a new branch away from them (see `doorProximityPenalty`) before it's grown. */
+function existingDoorSpansForRoom(doors: readonly DoorLike[], room: RoomBoxLike): DoorWallSpan[] {
+  const spans: DoorWallSpan[] = [];
+  for (const door of doors) {
+    const span = doorWallSpanOnRoom(door, room);
+    if (span) spans.push(span);
+  }
+  return spans;
+}
+
+/** Touching (gap 0) or one WALL_GAP cell apart (gap 1) both read as "the same opening, badly" - both get biased away from. */
+const DOOR_ADJACENCY_GAP = 1;
+/**
+ * Extra starting cost `findRoute` charges a launch point that would land a
+ * new door within `DOOR_ADJACENCY_GAP` wall cells of one already on this
+ * room - enough to usually lose to a launch point elsewhere on the room
+ * (a turn costs 4; windy jitter costs up to 3/cell), but not an outright
+ * ban: a room truly boxed into only that option still uses it rather than
+ * failing to connect at all (see `growConnectingBranch`'s own comment on
+ * why the connectivity guarantee has to come first). Whatever still lands
+ * close despite this gets cleaned up by `mergeAdjacentDoors`.
+ */
+const DOOR_ADJACENCY_PENALTY = 10;
+
+/** How much starting-cost penalty a launch point should carry for landing too close to an existing door on the same room wall - 0 if it's clear. */
+function doorProximityPenalty(existingSpans: readonly DoorWallSpan[], point: LaunchPoint): number {
+  const crossesX = point.dir[0] !== 0;
+  const [bx, by] = point.boundaryCell;
+  const fixed = crossesX ? bx : by;
+  const varying = crossesX ? by : bx;
+  for (const span of existingSpans) {
+    if (span.crossesX !== crossesX || span.fixed !== fixed) continue;
+    const gap = varying < span.lo ? span.lo - varying - 1 : varying > span.hi ? varying - span.hi - 1 : -1;
+    if (gap >= 0 && gap <= DOOR_ADJACENCY_GAP) return DOOR_ADJACENCY_PENALTY;
+  }
+  return 0;
+}
+
+/**
+ * The target-side mirror of `doorProximityPenalty` above - a branch's FAR
+ * end can land on a room too (whenever `findRoute`'s cheapest target is a
+ * `"room"` kind, not a corridor junction), and that room can have its own
+ * existing doors just as easily as the source room does. Extra cost for
+ * stepping onto any `targets` cell that would put a new door too close to
+ * one its own room already has; corridor-junction targets have no door at
+ * all, so they're left untouched.
+ */
+function buildTargetDoorPenalties(graph: Graph, targets: ReadonlyMap<string, RouteTarget>): Map<string, number> {
+  const extraCost = new Map<string, number>();
+  const spansByRoom = new Map<number, DoorWallSpan[]>();
+  for (const [key, target] of targets) {
+    if (target.kind !== "room") continue;
+    let spans = spansByRoom.get(target.roomId);
+    if (!spans) {
+      const targetRoom = graph.rooms.find((r) => r.id === target.roomId);
+      spans = targetRoom ? existingDoorSpansForRoom(graph.doors, targetRoom) : [];
+      spansByRoom.set(target.roomId, spans);
+    }
+    const penalty = doorProximityPenalty(spans, target.point);
+    if (penalty > 0) extraCost.set(key, penalty);
+  }
+  return extraCost;
+}
+
+/** True if `door`'s OTHER side (not whichever end is the room) is a real corridor - excludes a freestanding stair's placeholder door (see `addStairs`), which reuses the same room id on BOTH `connects` entries and has no corridor to repoint if merged. */
+function isCorridorBackedDoor(door: GenDoor): boolean {
+  return door.connects.some((end) => end.kind === "corridor");
+}
+
+/** Every corridor-backed door on `room`, grouped by which wall it's on and sorted low-to-high along that wall - the shared grouping `mergeAdjacentDoors` and `harmonizeCloseDoors` both walk. */
+function doorGroupsByWall(graph: Graph, room: GenRoom): { door: GenDoor; span: DoorWallSpan }[][] {
+  const byWall = new Map<string, { door: GenDoor; span: DoorWallSpan }[]>();
+  for (const door of graph.doors) {
+    if (!isCorridorBackedDoor(door)) continue;
+    const span = doorWallSpanOnRoom(door, room);
+    if (!span) continue;
+    const key = `${span.crossesX}:${span.fixed}`;
+    const list = byWall.get(key);
+    if (list) list.push({ door, span });
+    else byWall.set(key, [{ door, span }]);
+  }
+  for (const list of byWall.values()) list.sort((a, b) => a.span.lo - b.span.lo);
+  return [...byWall.values()];
+}
+
+/**
+ * Collapses any doors still left touching (0 wall cells apart) on the same
+ * room wall into one door spanning their combined width - the residual
+ * cleanup for whatever `doorProximityPenalty`'s bias didn't manage to
+ * avoid (see the section comment above it). The geometry never has to
+ * move to make this correct: two branches whose room-side boundary cells
+ * are exactly 1 wall-cell apart have corridor-side cells exactly 1 cell
+ * apart too (same fixed offset, same wall, same "+i" extension direction
+ * `doorWallSpanOnRoom` relies on) - i.e. their corridors are ALREADY
+ * flush-adjacent, the same "two different corridors meet with no wall
+ * between them" shape an ordinary junction produces elsewhere in this
+ * file. So merging only ever touches metadata: widen the survivor to the
+ * combined span (keeping its own roll - as good a pick as re-rolling, and
+ * simpler), repoint the deleted door's corridor from "room + door" to
+ * "flush against the survivor's corridor" (a junction, matching what's
+ * actually there now that its own door is gone), and drop the redundant
+ * door. Runs to a fixed point since 3+ touching doors collapse pairwise -
+ * a triple becomes a width-2 merge, then that width-2 door touches the
+ * third and merges again into width-3 - rather than needing triple-
+ * specific logic (see `pickDoorWidth` - width-3 is deliberately never a
+ * normal roll, only ever the result of this).
+ *
+ * A rarer one-WALL_GAP-cell-apart pair (gap 1) is left as two separate
+ * doors on purpose - closing that gap would mean carving a brand-new
+ * corridor cell nothing has ever occupied, purely to match a widened door
+ * icon, which is a bigger structural change than this bug is worth (see
+ * Dungeon Generator Status.md). `harmonizeCloseDoors` handles that case
+ * instead, without touching geometry.
+ */
+function mergeAdjacentDoors(graph: Graph): void {
+  for (const room of graph.rooms) {
+    let mergedSomething = true;
+    while (mergedSomething) {
+      mergedSomething = false;
+      for (const list of doorGroupsByWall(graph, room)) {
+        for (let i = 0; i < list.length - 1; i++) {
+          if (wallSpanGap(list[i].span, list[i + 1].span) === 0) {
+            mergeTwoDoors(graph, room, list[i].door, list[i + 1].door);
+            mergedSomething = true;
+            break;
+          }
+        }
+        if (mergedSomething) break;
+      }
+    }
+  }
+}
+
+/**
+ * Merges `b` into `a` (`a` is always the lower-`lo` door of the pair, per
+ * `mergeAdjacentDoors`'s sorted groups): widens `a` to cover both spans,
+ * repoints `b`'s corridor to meet `a`'s corridor at a junction instead of
+ * this room via a door, and removes `b`.
+ */
+function mergeTwoDoors(graph: Graph, room: GenRoom, a: GenDoor, b: GenDoor): void {
+  const spanA = doorWallSpanOnRoom(a, room)!;
+  const spanB = doorWallSpanOnRoom(b, room)!;
+  a.width = Math.max(spanA.hi, spanB.hi) - Math.min(spanA.lo, spanB.lo) + 1;
+
+  const aCorridorEnd = a.connects.find((end) => end.kind === "corridor") as { kind: "corridor"; id: number };
+  const bCorridorEnd = b.connects.find((end) => end.kind === "corridor") as { kind: "corridor"; id: number };
+  const bCorridor = graph.corridors.find((c) => c.id === bCorridorEnd.id);
+  if (bCorridor) {
+    bCorridor.connects = bCorridor.connects.map((end) =>
+      end.kind === "room" && end.id === room.id ? { kind: "corridor", id: aCorridorEnd.id } : end
+    ) as [DungeonCorridorEndpoint, DungeonCorridorEndpoint];
+  }
+
+  graph.doors = graph.doors.filter((d) => d.id !== b.id);
+}
+
+/**
+ * The gap-1 counterpart to `mergeAdjacentDoors`: doors left one WALL_GAP
+ * cell apart on the same room wall (not merged - see that function's doc
+ * comment on why) still shouldn't read as doors that just happened to
+ * collide. Forces every door in a close-together RUN to share one roll
+ * (material/secret/locked/trapped/stuck - the lowest-id door's), without
+ * touching geometry.
+ *
+ * Syncing pairwise instead (each door to just its immediate neighbor)
+ * looks right but isn't: for a run of 3+ (A-B gap 1, B-C gap 1), syncing
+ * B to A and then, in the very next pairwise check, B to C overwrites the
+ * first sync - B ends up matching C, and A and C are never reconciled
+ * with each other despite both being close to B. Grouping the whole
+ * transitively-connected run first and syncing everyone in it to one
+ * reference door (done here) avoids that order-dependent overwrite.
+ */
+function harmonizeCloseDoors(graph: Graph): void {
+  for (const room of graph.rooms) {
+    for (const list of doorGroupsByWall(graph, room)) {
+      let runStart = 0;
+      for (let i = 1; i <= list.length; i++) {
+        const connected = i < list.length && (wallSpanGap(list[i - 1].span, list[i].span) ?? Infinity) <= 1;
+        if (connected) continue;
+        if (i - 1 > runStart) {
+          const cluster = list.slice(runStart, i).map((x) => x.door);
+          const keep = cluster.reduce((best, d) => (d.id < best.id ? d : best));
+          for (const d of cluster) {
+            if (d.id === keep.id) continue;
+            d.material = keep.material;
+            d.secret = keep.secret;
+            d.locked = keep.locked;
+            d.trapped = keep.trapped;
+            d.stuck = keep.stuck;
+          }
+        }
+        runStart = i;
+      }
+    }
+  }
+}
+
 interface CommittedBranch {
   corridor: GenCorridor;
   door: GenDoor | null;
@@ -1066,6 +1357,41 @@ function growConnectingBranch(
   const sources = roomLaunchPoints(sourceRoom, grid);
 
   const targets = new Map<string, RouteTarget>();
+  const eligibleCorridors = targetCorridorIds ? graph.corridors.filter((c) => targetCorridorIds.has(c.id)) : graph.corridors;
+
+  // Direct-dock: a room's launch cell is a FIXED offset (2 cells straight
+  // out from a specific boundary face), not something a search can nudge -
+  // so two different rooms' launch grids can coincide on the exact same
+  // cell (common when they sit a few cells apart across a shared gap). If
+  // an eligible corridor already occupies that exact cell, don't treat it
+  // as blocked: dock this room onto it directly with a new door and no new
+  // corridor segment (a normal multi-door junction cell, not a hack) -
+  // rather than running a search that can only ever fail here (the cell
+  // is occupied) or, if some OTHER free launch point routes around it,
+  // potentially consuming whatever cell the search finds instead. Checked
+  // before the room-target loop below since it can shortcut straight past
+  // pathfinding entirely.
+  const eligibleCorridorCells = allCorridorCells(eligibleCorridors);
+  const directDockPoint = sources.find((p) => eligibleCorridorCells.has(cellKey(p.cell[0], p.cell[1])));
+  if (directDockPoint) {
+    const targetCorridor = eligibleCorridors.find((c) => c.cells.has(cellKey(directDockPoint.cell[0], directDockPoint.cell[1])))!;
+    const doorPick = doorAtLaunchPoint(directDockPoint, sourceRoom, rng);
+    const door: GenDoor = {
+      id: nextDoorId,
+      connects: [{ kind: "room", id: sourceRoom.id }, { kind: "corridor", id: targetCorridor.id }],
+      cellA: doorPick.cellA,
+      cellB: doorPick.cellB,
+      material: rng.choice(config.doorMaterials),
+      secret: rng.random() < config.secretDoorChance,
+      locked: rng.random() < config.lockedDoorChance,
+      trapped: rng.random() < config.trappedDoorChance,
+      stuck: rng.random() < config.stuckDoorChance,
+      width: doorPick.width,
+    };
+    graph.doors.push(door);
+    return { branch: { corridor: targetCorridor, door }, nextCorridorId, nextDoorId: nextDoorId + 1 };
+  }
+
   for (const room of graph.rooms) {
     if (room.id === sourceRoomId) continue;
     if (targetRoomIds && !targetRoomIds.has(room.id)) continue;
@@ -1073,7 +1399,6 @@ function growConnectingBranch(
       targets.set(cellKey(point.cell[0], point.cell[1]), { kind: "room", roomId: room.id, point });
     }
   }
-  const eligibleCorridors = targetCorridorIds ? graph.corridors.filter((c) => targetCorridorIds.has(c.id)) : graph.corridors;
   for (const [key, target] of corridorJunctionTargets(eligibleCorridors, roomBlocked, grid, graph.corridors)) {
     if (!targets.has(key)) targets.set(key, target);
   }
@@ -1081,7 +1406,26 @@ function growConnectingBranch(
 
   const windy = rng.random() < config.corridorWindyChance;
   const blocked = routeBlockedSet(roomBlocked, graph.corridors);
-  const route = findRoute(sources, targets, blocked, grid, windy, rng, config.corridorMaxSearchCost);
+  // Bias both ends away from a room's existing doors - the source room via
+  // extra starting cost on the risky launch points, the target room (when
+  // the branch ends on one) via extra cost on stepping onto its risky
+  // landing cells. Neither is a hard ban (see `doorProximityPenalty`), so
+  // connectivity still wins whenever a room is genuinely boxed into that
+  // one option.
+  const sourceDoorSpans = existingDoorSpansForRoom(graph.doors, sourceRoom);
+  const targetDoorPenalties = buildTargetDoorPenalties(graph, targets);
+  const route = findRoute(
+    sources,
+    targets,
+    blocked,
+    grid,
+    windy,
+    rng,
+    config.corridorMaxSearchCost,
+    undefined,
+    (s) => doorProximityPenalty(sourceDoorSpans, s),
+    targetDoorPenalties
+  );
   if (!route) return null;
 
   const corridorsBefore = graph.corridors.length;
@@ -1092,12 +1436,13 @@ function growConnectingBranch(
   // can accidentally wall off some other not-yet-connected room the same
   // way a badly-placed room's margin can (see `placeRooms`'s
   // `allRoomsReachEntranceFreeSpace` guard for the room-placement half of
-  // this). Found by testing: `placeRooms`'s guard alone still let roughly
-  // one room per generated floor end up permanently unreachable, always
-  // because a LATER corridor (for some other room entirely) happened to
-  // claim its last remaining launch cell. Roll back and report failure
-  // (the caller retries a different room/order) rather than silently
-  // accepting a connection that strands someone else.
+  // this). Only ROOM/region margins count as a genuine dead end here
+  // though (see `strandsAnUnconnectedRoom`) - a launch cell a corridor now
+  // occupies is never fatal on its own, since the direct-dock branch above
+  // means that room can still reach the network by docking onto that exact
+  // corridor cell on its own turn. Roll back and report failure (the
+  // caller retries a different room/order) rather than silently accepting
+  // a connection that strands someone else by margin alone.
   if (strandsAnUnconnectedRoom(graph, grid, sourceRoomId)) {
     graph.corridors.length = corridorsBefore;
     graph.doors.length = doorsBefore;
@@ -1108,15 +1453,26 @@ function growConnectingBranch(
 }
 
 /**
- * True if, given the graph's CURRENT committed corridors (including one
- * just tentatively added), some room that doesn't yet have any door at
- * all has also lost every one of its launch cells - i.e. this specific
- * commit would make that room permanently unreachable, not just
- * temporarily inconvenient. `justConnectedRoomId` is exempt since it's
- * about to get its first door as part of THIS same commit.
+ * True if some room that doesn't yet have any door at all has lost every
+ * one of its launch cells to ROOM/region margins - a genuine, permanent
+ * dead end, since a margin (unlike a corridor) never opens back up.
+ * `justConnectedRoomId` is exempt since it's about to get its first door
+ * as part of THIS same commit.
+ *
+ * Deliberately does NOT count a launch cell a corridor now occupies as
+ * blocking - `growConnectingBranch`'s direct-dock branch means a room can
+ * always still reach the network later by docking straight onto whatever
+ * corridor cell landed on its launch point (every corridor committed
+ * during the mandatory-connect pass is, by Prim's-style construction,
+ * already part of the one connected network - see `growMandatoryConnections`).
+ * An earlier version blocked on corridor occupancy too, which is what let
+ * two rooms whose fixed launch offsets coincided on the same cell
+ * permanently strand each other: whichever grew its corridor there first
+ * got rolled back for "stranding" the other, forever, since retrying
+ * later found the exact same route and rejected it the exact same way.
  */
 function strandsAnUnconnectedRoom(graph: Graph, grid: GridSize, justConnectedRoomId: number): boolean {
-  const blocked = routeBlockedSet(buildRoomBlockedSet(graph), graph.corridors);
+  const blocked = buildRoomBlockedSet(graph);
   const roomsWithDoors = new Set<number>([justConnectedRoomId]);
   for (const d of graph.doors) {
     for (const end of d.connects) if (end.kind === "room") roomsWithDoors.add(end.id);
@@ -1189,6 +1545,9 @@ function commitRoute(
     cellB: startDoorPick.cellB,
     material: rng.choice(config.doorMaterials),
     secret: rng.random() < config.secretDoorChance,
+    locked: rng.random() < config.lockedDoorChance,
+    trapped: rng.random() < config.trappedDoorChance,
+    stuck: rng.random() < config.stuckDoorChance,
     width: startDoorPick.width,
   };
   graph.doors.push(startDoor);
@@ -1203,6 +1562,9 @@ function commitRoute(
       cellB: endDoorPick.cellA,
       material: rng.choice(config.doorMaterials),
       secret: rng.random() < config.secretDoorChance,
+      locked: rng.random() < config.lockedDoorChance,
+      trapped: rng.random() < config.trappedDoorChance,
+      stuck: rng.random() < config.stuckDoorChance,
       width: endDoorPick.width,
     };
     graph.doors.push(endDoor);
@@ -1363,7 +1725,15 @@ function growSpur(
     sourceRoom = rng.choice(graph.rooms);
     const points = roomLaunchPoints(sourceRoom, grid).filter((p) => !roomBlocked.has(cellKey(p.cell[0], p.cell[1])) && !occupied.has(cellKey(p.cell[0], p.cell[1])));
     if (!points.length) return null;
-    start = rng.choice(points);
+    // Same door-spacing preference as `growConnectingBranch` (see the
+    // section comment above `doorProximityPenalty`), just expressed as a
+    // hard filter instead of a cost bias - a spur has no path search to
+    // bias, and there's no connectivity guarantee to protect here (a spur
+    // failing to grow is always fine), so prefer a clear point outright and
+    // only fall back to a close one when nothing else is available.
+    const existingSpans = existingDoorSpansForRoom(graph.doors, sourceRoom);
+    const clear = points.filter((p) => doorProximityPenalty(existingSpans, p) === 0);
+    start = rng.choice(clear.length ? clear : points);
   } else {
     const junctions = [...corridorJunctionTargets(graph.corridors, roomBlocked, grid).entries()];
     if (!junctions.length) return null;
@@ -1441,6 +1811,9 @@ function growSpur(
       cellB: doorPick.cellB,
       material: rng.choice(config.doorMaterials),
       secret: rng.random() < config.secretDoorChance,
+      locked: rng.random() < config.lockedDoorChance,
+      trapped: rng.random() < config.trappedDoorChance,
+      stuck: rng.random() < config.stuckDoorChance,
       width: doorPick.width,
     };
     graph.doors.push(door);
@@ -1595,6 +1968,9 @@ function addStairs(graph: Graph, grid: GridSize, config: GenerateConfig, rng: Rn
       cellB: doorPick.cellB,
       material: rng.choice(config.doorMaterials),
       secret: rng.random() < config.secretDoorChance,
+      locked: rng.random() < config.lockedDoorChance,
+      trapped: rng.random() < config.trappedDoorChance,
+      stuck: rng.random() < config.stuckDoorChance,
       width: 1,
     };
     graph.doors.push(door);
@@ -1683,6 +2059,52 @@ export function isConnected(data: DungeonFloorData): boolean {
   return data.rooms.every((r) => reached.has(r.id));
 }
 
+export interface DoorSpacingIssue {
+  roomId: number;
+  doorIds: [number, number];
+  /** Wall-cell gap between the two doors - 0 = touching, 1 = a single WALL_GAP cell between. */
+  gap: number;
+}
+
+/**
+ * Every pair of different, corridor-backed doors that land on the same
+ * room wall close enough to read as one opening (touching, or separated
+ * by only the mandatory WALL_GAP cell) - exported for tests/reproduction,
+ * same "trust the exported shape, not the generator's own internals" style
+ * as `isConnected`. A fully merged pair (see `mergeAdjacentDoors`) never
+ * shows up here, since it's a single door object by the time generation
+ * finishes; a harmonized gap-1 pair (see `harmonizeCloseDoors`) still
+ * does, since its geometry is deliberately untouched - a caller checking
+ * for "still close, but every roll matches" should pair this with
+ * checking the flagged doors' own fields, not just counting issues.
+ */
+export function findCloseDoorPairs(data: DungeonFloorData): DoorSpacingIssue[] {
+  const issues: DoorSpacingIssue[] = [];
+  for (const room of data.rooms) {
+    const byWall = new Map<string, { door: DungeonDoor; span: DoorWallSpan }[]>();
+    for (const door of data.doors) {
+      if (!door.connects.some((end) => end.kind === "corridor")) continue;
+      const span = doorWallSpanOnRoom(door, room);
+      if (!span) continue;
+      const key = `${span.crossesX}:${span.fixed}`;
+      const list = byWall.get(key);
+      if (list) list.push({ door, span });
+      else byWall.set(key, [{ door, span }]);
+    }
+    for (const list of byWall.values()) {
+      if (list.length < 2) continue;
+      list.sort((a, b) => a.span.lo - b.span.lo);
+      for (let i = 0; i < list.length - 1; i++) {
+        const gap = wallSpanGap(list[i].span, list[i + 1].span);
+        if (gap !== null && gap <= 1) {
+          issues.push({ roomId: room.id, doorIds: [list[i].door.id, list[i + 1].door.id], gap });
+        }
+      }
+    }
+  }
+  return issues;
+}
+
 function roomDistancesFromEntrance(data: DungeonFloorData, entranceId: number): Map<number, number> {
   const { cells, roomOwner } = buildWalkableCells(data);
   const entrance = data.rooms.find((r) => r.id === entranceId);
@@ -1764,6 +2186,9 @@ function toDungeonFloorData(graph: Graph): DungeonFloorData {
     material: d.material,
     secret: d.secret,
     width: d.width,
+    locked: d.locked,
+    trapped: d.trapped,
+    stuck: d.stuck,
   }));
   const stairs: DungeonStair[] = graph.stairs.map((s) => ({
     id: s.id,
@@ -1811,6 +2236,8 @@ export function generateFloor(config: GenerateConfig): DungeonFloorData {
   growLoops(graph, grid, config, rng);
   const spurs = growSpurs(graph, grid, config, rng);
   pruneDeadEnds(graph, spurs, config);
+  mergeAdjacentDoors(graph);
+  harmonizeCloseDoors(graph);
   addStairs(graph, grid, config, rng);
 
   let data = toDungeonFloorData(graph);

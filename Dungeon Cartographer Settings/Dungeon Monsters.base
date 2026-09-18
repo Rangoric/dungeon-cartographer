@@ -1,0 +1,21 @@
+filters:
+  and:
+    - file.inFolder("Source Data/Monsters")
+
+views:
+  - type: table
+    name: Dungeon Monsters (Underground / Any)
+    filters:
+      and:
+        - or:
+            - note.terrain_hex.contains("Underground")
+            - note.terrain_hex.contains("Any")
+    order:
+      - file.name
+      - note.Challenge_Rating
+      - note.Type
+      - note.Size
+      - note.terrain_hex
+    sort:
+      - property: note.Challenge_Rating
+        direction: ASC

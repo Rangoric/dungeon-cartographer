@@ -4,20 +4,24 @@
 // Folder Structure section and Simplification Plan.md, 2026-07-31).
 //
 // Unlike a `.dungeon` file, a Setup file is a normal human-editable Obsidian
-// note: a markdown table, not JSON. Schema is deliberately minimal for now -
-// grid size only (see Simplification Plan.md's "Per-floor Setup file schema"
-// decision) - more fields (flair, must-includes, rule overrides) can be
-// added later if actually needed.
+// note: a markdown table, not JSON. Schema was grid-size-only at first (see
+// Simplification Plan.md's "Per-floor Setup file schema" decision); `Level`
+// was added 2026-09-14 (see Dungeon Generator Architecture.md's Physical
+// Constraints section - "Dungeon level: each floor has a level (baseline
+// encounter CR)" - this is that field finally getting parsed). More fields
+// (flair, must-includes, rule overrides) can still be added later if
+// actually needed.
 //
 // Example file contents:
 //
 //   | Setting     | Value   |
 //   | ----------- | ------- |
 //   | Grid Size   | 34 × 34 |
+//   | Level       | 1       |
 //
 // Parsing is deliberately forgiving rather than throwing: this is a file a
 // person hand-edits, so a missing/malformed row falls back to the standard
-// 34×34 default instead of blocking the generate button on a typo.
+// default instead of blocking the generate button on a typo.
 //
 // Grid Size here is the *generated* area, not the final built footprint -
 // confirmed 2026-07-31 (see Block Walls Plan.md): the outer wall ring now
@@ -29,26 +33,49 @@
 export interface FloorSetup {
   gridWidth: number;
   gridDepth: number;
+  /**
+   * The floor's baseline encounter CR / party level, 1-20 (see Dungeon
+   * Generator Architecture.md's Physical Constraints: "each floor has a
+   * level"). Added 2026-09-14 alongside `Dungeon Generation/Rules/Lock,
+   * Trap & Stuck Door DCs.md`, which keys its DC tables off this number
+   * during the Room Content pass. Not currently read by generation itself
+   * - `configFromFloorSetup` in generate.ts only maps gridWidth/gridDepth
+   * - this is content-layer input, not a physical-layout knob.
+   */
+  level: number;
 }
 
-/** The standard *generated-area* size - see Dungeon Generation Notes.md's "The Basics". Exported `.dungeon` grid ends up 2 cells larger on each axis once the outer wall ring is accounted for (see the module header). */
+/** The standard *generated-area* size - see Dungeon Generation Notes.md's "The Basics". Exported `.dungeon` grid ends up 2 cells larger on each axis once the outer wall ring is accounted for (see the module header). Level defaults to 1 (the lowest baseline encounter CR). */
 export const DEFAULT_FLOOR_SETUP: FloorSetup = {
   gridWidth: 34,
   gridDepth: 34,
+  level: 1,
 };
+
+/** Lowest/highest accepted `Level` value - matches the character-level range the Rules folder's DC tables are tiered across. */
+const MIN_LEVEL = 1;
+const MAX_LEVEL = 20;
 
 /**
  * Parse a floor Setup file's raw markdown text. Looks for a "Grid Size" row
  * in any markdown table (`| Grid Size | 36 × 36 |`, case/spacing-insensitive)
- * and splits its value on `×`/`x`/`X` into width/depth. Falls back to
- * `DEFAULT_FLOOR_SETUP` (whole or per-axis) whenever a row is missing,
+ * and splits its value on `×`/`x`/`X` into width/depth, and a "Level" row
+ * (`| Level | 1 |`) parsed as a plain integer, clamped to 1-20. Falls back
+ * to `DEFAULT_FLOOR_SETUP` (whole or per-field) whenever a row is missing,
  * unparsable, or the file doesn't look like a settings table at all - never
  * throws, since a hand-edited note is expected to occasionally be malformed
  * mid-edit.
  */
 export function parseFloorSetup(fileText: string): FloorSetup {
+  return {
+    ...parseGridSize(fileText),
+    level: parseLevel(fileText),
+  };
+}
+
+function parseGridSize(fileText: string): Pick<FloorSetup, "gridWidth" | "gridDepth"> {
   const row = findSettingRow(fileText, "grid size");
-  if (!row) return { ...DEFAULT_FLOOR_SETUP };
+  if (!row) return { gridWidth: DEFAULT_FLOOR_SETUP.gridWidth, gridDepth: DEFAULT_FLOOR_SETUP.gridDepth };
 
   const dimensions = row.split(/[×xX]/).map((part) => Number.parseInt(part.trim(), 10));
   const [width, depth] = dimensions;
@@ -57,6 +84,16 @@ export function parseFloorSetup(fileText: string): FloorSetup {
     gridWidth: Number.isFinite(width) && width > 0 ? width : DEFAULT_FLOOR_SETUP.gridWidth,
     gridDepth: Number.isFinite(depth) && depth > 0 ? depth : DEFAULT_FLOOR_SETUP.gridDepth,
   };
+}
+
+function parseLevel(fileText: string): number {
+  const row = findSettingRow(fileText, "level");
+  if (!row) return DEFAULT_FLOOR_SETUP.level;
+
+  const parsed = Number.parseInt(row.trim(), 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_FLOOR_SETUP.level;
+
+  return Math.min(MAX_LEVEL, Math.max(MIN_LEVEL, parsed));
 }
 
 /**

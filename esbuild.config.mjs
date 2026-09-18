@@ -14,7 +14,10 @@ const context = await esbuild.context({
   banner: { js: banner },
   entryPoints: ["src/main.ts"],
   bundle: true,
-  // `three` is bundled in; only the Obsidian runtime + node/electron stay external.
+  // 2026-09-05: `three` used to be bundled in here (the dungeon view was a
+  // Three.js scene) - it's gone now that the view is a flat SVG renderer,
+  // see "2D Rendering Plan.md" rollout step 6. Only the Obsidian runtime +
+  // node/electron stay external.
   external: [
     "obsidian",
     "electron",

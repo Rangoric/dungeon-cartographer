@@ -3,6 +3,7 @@ import {
   Rng,
   generateFloor,
   isConnected,
+  findCloseDoorPairs,
   configFromFloorSetup,
   DEFAULT_GENERATE_CONFIG,
   type GenerateConfig,
@@ -174,12 +175,22 @@ describe("generateFloor - structural invariants", () => {
     }
   });
 
-  it("produces a connected graph", () => {
-    for (let seed = 0; seed < 20; seed++) {
-      const data = generateFloor(testConfig({ seed }));
-      expect(isConnected(data)).toBe(true);
-    }
-  });
+  it(
+    "produces a connected graph",
+    () => {
+      // Swept 0-499 during the 2026-09-13 disconnected-floor fix (Dungeon
+      // Generator Status.md, formerly "Known Issues") - was ~5-6% of seeds
+      // (32/500) before `growConnectingBranch` grew a direct-dock fallback
+      // for two rooms whose fixed launch-point offsets land on the same
+      // cell; 0/500 after. Kept at the full swept width, not just a sample,
+      // so a regression here can't silently slip back under 20 seeds.
+      for (let seed = 0; seed < 500; seed++) {
+        const data = generateFloor(testConfig({ seed }));
+        expect(isConnected(data)).toBe(true);
+      }
+    },
+    60000
+  );
 
   it("is deterministic for a given seed", () => {
     const config = testConfig({ seed: 42 });
@@ -286,7 +297,12 @@ describe("generateFloor - doors", () => {
     expect(data.doors.length).toBeGreaterThan(0);
     for (const door of data.doors) {
       expect(Number.isInteger(door.width)).toBe(true);
-      expect(door.width === 1 || door.width === 2).toBe(true);
+      // 1 (normal) or 2 (10' double door) from the normal weighted roll -
+      // plus a rare 3, which only ever comes from `mergeAdjacentDoors`
+      // collapsing 3 independently-placed doors that ended up touching on
+      // the same wall (see "door spacing" below); never a 4th option in
+      // `pickDoorWidth()` itself.
+      expect([1, 2, 3]).toContain(door.width);
       const [ax, ay, az] = door.cellA;
       const [bx, by] = door.cellB;
       const gx = (ax + bx) / 2;
@@ -306,6 +322,167 @@ describe("generateFloor - doors", () => {
         if (end.kind === "corridor") expect(corridorIds.has(end.id)).toBe(true);
       }
     }
+  });
+});
+
+describe("generateFloor - door spacing (2026-09-14)", () => {
+  const SPACING_SWEEP_CONFIGS: [string, Partial<GenerateConfig>][] = [
+    ["20x20 default", {}],
+    ["36x36 default", { gridWidth: 36, gridDepth: 36 }],
+    ["30x30 dense footprint", { gridWidth: 30, gridDepth: 30, footprintTarget: 0.55 }],
+  ];
+  const SPACING_SWEEP_SEEDS = 200;
+
+  /** Asserts the two invariants `mergeAdjacentDoors`/`harmonizeCloseDoors` are meant to guarantee; returns the door count and issue count so a sweep can also track the overall close-pair rate. */
+  function assertNoTouchingOrMismatchedDoors(data: DungeonFloorData): { doors: number; issues: number } {
+    const issues = findCloseDoorPairs(data);
+    expect(issues.filter((i) => i.gap === 0)).toEqual([]);
+    for (const issue of issues) {
+      const a = data.doors.find((d) => d.id === issue.doorIds[0])!;
+      const b = data.doors.find((d) => d.id === issue.doorIds[1])!;
+      expect({ material: a.material, secret: a.secret, locked: a.locked, trapped: a.trapped, stuck: a.stuck }).toEqual({
+        material: b.material,
+        secret: b.secret,
+        locked: b.locked,
+        trapped: b.trapped,
+        stuck: b.stuck,
+      });
+    }
+    return { doors: data.doors.length, issues: issues.length };
+  }
+
+  it("never leaves a 3+ chain of close doors mismatched (regression: seed 694, dense config)", () => {
+    // `harmonizeCloseDoors`'s original version synced each pair to its own
+    // immediate neighbor independently - for a run of 3 (A-B gap 1, B-C gap
+    // 1), that synced B to A and then, in the very next pairwise check,
+    // overwrote B to match C instead, leaving A and C mismatched despite
+    // both being close to B. Seed 694 at this denser config is the exact
+    // case that surfaced it (room 1 had a run of exactly 3 doors, each one
+    // WALL_GAP cell from the next) - kept as its own seed rather than
+    // trusting the general sweep below to land on it, since 694 falls
+    // outside that sweep's swept range.
+    assertNoTouchingOrMismatchedDoors(generateFloor(testConfig({ seed: 694, gridWidth: 30, gridDepth: 30, footprintTarget: 0.55 })));
+  });
+
+  it(
+    "never leaves two doors touching, and never leaves two close doors mismatched, across a wide seed sweep",
+    () => {
+      // Swept while diagnosing this bug (three configs above, 0-999 each -
+      // more rooms/denser footprints mean more doors and more chances to
+      // collide): touching pairs (gap 0) were common before the fix
+      // (748-1206 per 1000 seeds) and fully eliminated after - a genuinely
+      // touching pair always has somewhere to merge into (see
+      // `mergeAdjacentDoors`'s doc comment on why the geometry never has to
+      // move), so that half is a hard guarantee, not a "usually".
+      //
+      // The gap-1 case (one WALL_GAP cell between two independently-rolled
+      // doors) is deliberately left as two separate door objects rather
+      // than merged - see `mergeAdjacentDoors`'s doc comment on why closing
+      // that gap would mean carving a corridor cell nothing has ever
+      // occupied. `harmonizeCloseDoors` closes the actual reported bug
+      // instead: forcing every door in a close-together run to share one
+      // roll, so they read as a deliberately matched set rather than a
+      // collision - the check the bug report asked for verbatim ("no two
+      // doors sharing a wall differ in material/rolls within one cell of
+      // each other"), and a hard guarantee regardless of how many doors
+      // end up in one run (a 3+ chain needs every member synced to the
+      // SAME reference door, not just its immediate neighbor - the exact
+      // bug `harmonizeCloseDoors` had until this fix, caught by sweeping
+      // seed 694 at the dense config specifically).
+      //
+      // One seed count kept smaller than the connectivity sweep's own
+      // 0-499 (single config) since this one runs three configs, two of
+      // them at larger/denser grids - still comfortably wide enough to
+      // have caught both bugs above when they existed.
+      let totalDoors = 0;
+      let totalIssues = 0;
+      for (const [, overrides] of SPACING_SWEEP_CONFIGS) {
+        for (let seed = 0; seed < SPACING_SWEEP_SEEDS; seed++) {
+          const data = generateFloor(testConfig({ seed, ...overrides }));
+          const { doors, issues } = assertNoTouchingOrMismatchedDoors(data);
+          totalDoors += doors;
+          totalIssues += issues;
+        }
+      }
+      // Sanity check the bias is actually doing something - close pairs
+      // should stay a small minority of all doors placed, not the norm.
+      // Not a "near zero" assertion on raw pair count - a gap-1 pair is an
+      // accepted, expected outcome once the bias's soft preference loses
+      // to a room simply running out of clearly-separated wall (see
+      // `doorProximityPenalty`'s doc comment). Baseline (bias + merge both
+      // disabled) sweeps of the same three configs put this ratio at
+      // roughly 4-10%; comfortably under 5% after the fix.
+      expect(totalIssues / totalDoors).toBeLessThan(0.05);
+    },
+    120000
+  );
+
+  it("a merged 3-cell-wide door (seed 96, default config) frames one continuous gap span with nothing covering it", () => {
+    // Same shape as the pre-existing "every door's gap cells are uncovered"
+    // check above, but specifically for a width>=3 door - the only way one
+    // is ever produced (see `pickDoorWidth` - 3 is never a normal roll) -
+    // so a merge that got the span math wrong wouldn't just look wrong,
+    // it'd actually cover real floor.
+    const data = generateFloor(testConfig({ seed: 96 }));
+    const door = data.doors.find((d) => d.width >= 3);
+    expect(door).toBeDefined();
+    const interiors = allSegments(data);
+    const isCovered = (x: number, y: number, z: number) =>
+      interiors.some((seg) => x >= seg.x && x < seg.x + seg.w && y >= seg.y && y < seg.y + seg.d && z >= seg.z && z < seg.z + seg.h);
+    const [ax, ay, az] = door!.cellA;
+    const [bx, by] = door!.cellB;
+    const crossesX = ax !== bx;
+    const gx = (ax + bx) / 2;
+    const gy = (ay + by) / 2;
+    for (let i = 0; i < door!.width; i++) {
+      const [cx, cy] = crossesX ? [gx, gy + i] : [gx + i, gy];
+      expect(isCovered(cx, cy, az)).toBe(false);
+    }
+  });
+});
+
+describe("generateFloor - door quality rolls (locked/trapped/stuck, 2026-09-05)", () => {
+  it("rolls no locked/trapped/stuck doors when all three chances are 0", () => {
+    const data = generateFloor(
+      testConfig({ gridWidth: 24, gridDepth: 24, seed: 9, lockedDoorChance: 0, trappedDoorChance: 0, stuckDoorChance: 0 })
+    );
+    expect(data.doors.length).toBeGreaterThan(0);
+    for (const door of data.doors) {
+      expect(door.locked).toBe(false);
+      expect(door.trapped).toBe(false);
+      expect(door.stuck).toBe(false);
+    }
+  });
+
+  it("rolls every door locked, trapped, AND stuck at once when all three chances are 1 - independent, not mutually exclusive", () => {
+    const data = generateFloor(
+      testConfig({ gridWidth: 24, gridDepth: 24, seed: 9, lockedDoorChance: 1, trappedDoorChance: 1, stuckDoorChance: 1 })
+    );
+    expect(data.doors.length).toBeGreaterThan(0);
+    for (const door of data.doors) {
+      expect(door.locked).toBe(true);
+      expect(door.trapped).toBe(true);
+      expect(door.stuck).toBe(true);
+    }
+  });
+
+  it("produces a mix of locked/trapped/stuck (and combinations) under the confirmed default weights", () => {
+    // Pool doors across many seeds at the real gridsize/default config rather
+    // than asserting exact counts against the tunable weights themselves
+    // (see Dungeon Data Format.md - "a starting point, not final").
+    const allDoors = [];
+    for (let seed = 0; seed < 15; seed++) {
+      const data = generateFloor(testConfig({ gridWidth: 36, gridDepth: 36, seed }));
+      allDoors.push(...data.doors);
+    }
+    expect(allDoors.length).toBeGreaterThan(50);
+    expect(allDoors.some((d) => d.locked)).toBe(true);
+    expect(allDoors.some((d) => d.trapped)).toBe(true);
+    expect(allDoors.some((d) => d.stuck)).toBe(true);
+    expect(allDoors.some((d) => !d.locked && !d.trapped && !d.stuck)).toBe(true);
+    // At least one door should show a real combination, proving the three
+    // rolls are independent rather than one pick among locked/trapped/stuck.
+    expect(allDoors.some((d) => d.locked && d.trapped)).toBe(true);
   });
 });
 

@@ -121,6 +121,43 @@ describe("parseDungeonFloor - door width defaulting", () => {
   });
 });
 
+describe("parseDungeonFloor - door locked/trapped/stuck defaulting", () => {
+  it("defaults missing locked/trapped/stuck to false (an older file, written before 2026-09-05)", () => {
+    const json = `{
+      "grid": { "width": 10, "depth": 10, "height": 6 },
+      "doors": [{ "id": 0, "connects": [0, 1], "cellA": [1, 1, 0], "cellB": [3, 1, 0], "material": "wood", "secret": false }]
+    }`;
+    const data = parseDungeonFloor(json);
+    expect(data.doors[0].locked).toBe(false);
+    expect(data.doors[0].trapped).toBe(false);
+    expect(data.doors[0].stuck).toBe(false);
+  });
+
+  it("preserves explicit locked/trapped/stuck values, independently and in any combination", () => {
+    const json = `{
+      "grid": { "width": 10, "depth": 10, "height": 6 },
+      "doors": [
+        { "id": 0, "connects": [0, 1], "cellA": [1, 1, 0], "cellB": [3, 1, 0], "material": "wood", "secret": false, "locked": true, "trapped": false, "stuck": false },
+        { "id": 1, "connects": [0, 1], "cellA": [1, 3, 0], "cellB": [3, 3, 0], "material": "wood", "secret": false, "locked": true, "trapped": true, "stuck": true }
+      ]
+    }`;
+    const data = parseDungeonFloor(json);
+    expect(data.doors[0]).toMatchObject({ locked: true, trapped: false, stuck: false });
+    expect(data.doors[1]).toMatchObject({ locked: true, trapped: true, stuck: true });
+  });
+
+  it("treats a non-true value (missing key, or anything other than literal true) as false", () => {
+    for (const badValue of [`"yes"`, "1", "null"]) {
+      const json = `{
+        "grid": { "width": 10, "depth": 10, "height": 6 },
+        "doors": [{ "id": 0, "connects": [0, 1], "cellA": [1, 1, 0], "cellB": [3, 1, 0], "material": "wood", "secret": false, "locked": ${badValue} }]
+      }`;
+      const data = parseDungeonFloor(json);
+      expect(data.doors[0].locked).toBe(false);
+    }
+  });
+});
+
 describe("EMPTY_FLOOR_DATA", () => {
   it("is a valid, empty floor", () => {
     expect(EMPTY_FLOOR_DATA.rooms).toEqual([]);

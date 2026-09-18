@@ -1,25 +1,36 @@
 import { ItemView, Notice, Plugin, TFile, ViewStateResult, WorkspaceLeaf } from "obsidian";
-import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { PLACEHOLDER_ROOMS, roomCenter } from "./rooms";
 import { parseDungeonFloor, type DungeonFloorData } from "./dungeonData";
-import { floorToRenderSpecs, DOOR_LEGEND, type PlaneSpec, type WallSpec } from "./renderFloor";
+import { createFloor2DView, renderFloorToSvgString, type Floor2DView } from "./floor2dView";
 import { generateFloor, configFromFloorSetup } from "./generate";
 import { parseFloorSetup, DEFAULT_FLOOR_SETUP, type FloorSetup } from "./floorSetup";
+import { copySettingsDefaults } from "./settingsSync";
+
+// 2026-09-05: the 3D Three.js viewer (OrbitControls, WebGLRenderer, the
+// whole scene-graph approach) is retired in favor of a flat top-down SVG
+// view - see "2d map.md"/"2D Rendering Plan.md" in the Dungeon Generation
+// vault folder for why (the 3D angled view never matched how a physical
+// dungeon reads at the table) and for the full rollout order this is
+// steps 4 (the view itself) and 5 (the export/print action below) of.
+// `floor2d.ts`/`floor2dView.ts` are the 3D scene's replacement. The
+// `three`/`OrbitControls` npm dependency is dropped as of step 6
+// (package.json/esbuild.config.mjs), and the old 3D-only source files
+// (`renderFloor.ts`, `rooms.ts`, and their tests) are deleted outright -
+// nothing referenced them once step 6 confirmed that.
 
 /**
  * Style for the "Generate Random Map"/"Finalize" overlay buttons - see
  * Dungeon Generation Notes.md's Dungeon Folder Structure section and
- * Simplification Plan.md (2026-07-31).
+ * Simplification Plan.md (2026-07-31). Restyled 2026-09-05 for the new
+ * light (Field Print) background - the old dark-panel styling read as
+ * illegible/inverted against a white map.
  */
 const ACTION_BUTTON_STYLE =
-  "padding:4px 10px;font:12px sans-serif;border-radius:4px;border:1px solid #444466;" +
-  "background:#2a2a3a;color:#e0e0f0;cursor:pointer;";
+  "padding:4px 10px;font:12px sans-serif;border-radius:4px;border:1px solid #cccccc;" +
+  "background:#f5f5f5;color:#222222;cursor:pointer;";
 
-/** Line color for the top-down ceiling grid overlay - see buildCeilingGridMesh(). */
-const CEILING_WIRE_COLOR = 0x8888aa;
-/** Vertical offset (grid units) of the ceiling grid overlay above the solid ceiling plane - see buildCeilingGridMesh(). */
-const CEILING_GRID_EPSILON = 0.01;
+const OVERLAY_STYLE =
+  "color:#333333;font:11px sans-serif;background:rgba(255,255,255,0.88);padding:2px 6px;" +
+  "border-radius:3px;pointer-events:none;border:1px solid #dddddd;";
 
 const VIEW_TYPE = "dungeon-cartographer";
 // A real, single-segment extension - NOT "dungeon.md". Obsidian keys a
@@ -32,24 +43,60 @@ const VIEW_TYPE = "dungeon-cartographer";
 // Dungeon Data Format.md.
 const FLOOR_EXTENSION = "dungeon";
 
+/**
+ * Door/stair icon legend - the on-screen key for `floor2dView.ts`'s icon
+ * language (material/locked/trapped/stuck/secret/stairs). Always shown
+ * (resolved 2026-09-05, see "2d map.md") rather than a first-look-only
+ * aid, since actual usage is infrequent enough over time that details are
+ * easy to forget between sessions. Markup matches the validated
+ * comparison-artifact legend exactly (see the session's Cartographer
+ * Style Study), just inlined here instead of hand-duplicated.
+ */
+const LEGEND_ITEMS: { svg: string; label: string }[] = [
+  {
+    svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111"/><rect x="3" y="7" width="16" height="8" fill="#c9a876" stroke="#6b4a24" stroke-width="1.4"/></svg>',
+    label: "Wood door",
+  },
+  {
+    svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111"/><rect x="3" y="7" width="16" height="8" fill="#7f8e99" stroke="#333d43" stroke-width="1.4"/></svg>',
+    label: "Metal door",
+  },
+  {
+    svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111"/><rect x="3" y="7" width="16" height="8" fill="#d8d3c8" stroke="#6b6558" stroke-width="1.4"/></svg>',
+    label: "Stone door",
+  },
+  {
+    svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111"/><rect x="3" y="7" width="16" height="8" fill="#c9a876" stroke="#6b4a24" stroke-width="1.4"/><circle cx="11" cy="11" r="2.6" fill="#1c1c1c"/></svg>',
+    label: "Locked",
+  },
+  {
+    svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111"/><rect x="3" y="7" width="16" height="8" fill="#c9a876" stroke="#b23b2e" stroke-width="2.2"/></svg>',
+    label: "Trapped",
+  },
+  {
+    svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111"/><rect x="3" y="7" width="16" height="8" fill="#c9a876" stroke="#6b4a24" stroke-width="1.4"/><line x1="3" y1="7" x2="19" y2="15" stroke="#4a4a4a" stroke-width="1.3" stroke-linecap="round"/><line x1="19" y1="7" x2="3" y2="15" stroke="#4a4a4a" stroke-width="1.3" stroke-linecap="round"/></svg>',
+    label: "Stuck",
+  },
+  {
+    svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111"/><rect x="3" y="7" width="16" height="8" fill="#c9a876" stroke="#6b4a24" stroke-width="1.4"/><text x="11" y="11" font-size="8" font-weight="bold" font-family="sans-serif" text-anchor="middle" dominant-baseline="central" fill="#1c1c1c">S</text></svg>',
+    label: "Secret",
+  },
+  {
+    svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111" stroke="#111111"/><line x1="4" y1="6" x2="18" y2="6" stroke="#ffffff" stroke-width="1.6"/><line x1="4" y1="10" x2="18" y2="10" stroke="#ffffff" stroke-width="1.6"/><line x1="4" y1="14" x2="18" y2="14" stroke="#ffffff" stroke-width="1.6"/><line x1="4" y1="18" x2="18" y2="18" stroke="#ffffff" stroke-width="1.6"/></svg>',
+    label: "Stairs down",
+  },
+];
+
 // ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
 
 class DungeonView extends ItemView {
-  private renderer: THREE.WebGLRenderer | null = null;
-  private scene: THREE.Scene | null = null;
-  private camera: THREE.PerspectiveCamera | null = null;
-  private controls: OrbitControls | null = null;
-  private resizeObserver: ResizeObserver | null = null;
-  private frameHandle = 0;
+  private mapView: Floor2DView | null = null;
 
   private file: TFile | null = null;
-  private floorGroup: THREE.Group | null = null;
-  private gridHelper: THREE.GridHelper | null = null;
   private statusEl: HTMLElement | null = null;
   private actionsEl: HTMLElement | null = null;
-  private gridTexture: THREE.CanvasTexture | null = null;
   /** The currently displayed floor's parsed data - null while showing the placeholder. */
   private data: DungeonFloorData | null = null;
   /** Guards against overlapping generate/finalize clicks (both are async). */
@@ -83,7 +130,7 @@ class DungeonView extends ItemView {
       const file = this.app.vault.getAbstractFileByPath(filePath);
       if (file instanceof TFile) {
         this.file = file;
-        if (this.scene) await this.loadAndRender();
+        if (this.mapView) await this.loadAndRender();
       }
     }
     return super.setState(state, result);
@@ -92,57 +139,24 @@ class DungeonView extends ItemView {
   async onOpen(): Promise<void> {
     const host = this.contentEl;
     host.empty();
-    host.style.cssText =
-      "padding:0;margin:0;width:100%;height:100%;overflow:hidden;position:relative;";
+    host.style.cssText = "padding:0;margin:0;width:100%;height:100%;overflow:hidden;position:relative;";
 
-    const width = host.clientWidth || 800;
-    const height = host.clientHeight || 600;
+    // --- The SVG map itself, filling the pane ------------------------------
+    const mapHost = host.createDiv();
+    mapHost.style.cssText = "position:absolute;inset:0;";
+    this.mapView = createFloor2DView(mapHost);
 
-    // --- Renderer ---------------------------------------------------------
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.setSize(width, height, false);
-    renderer.domElement.style.cssText = "display:block;width:100%;height:100%;";
-    host.appendChild(renderer.domElement);
-    this.renderer = renderer;
-
-    // --- Scene ------------------------------------------------------------
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a1a24);
-    this.scene = scene;
-
-    // --- Camera -----------------------------------------------------------
-    const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000);
-    camera.position.set(8, 8, 12);
-    camera.lookAt(0, 0, 0);
-    this.camera = camera;
-
-    // --- Controls ---------------------------------------------------------
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
-    controls.target.set(0, 0, 0);
-    this.controls = controls;
-
-    // --- Lighting ---------------------------------------------------------
-    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-    const directional = new THREE.DirectionalLight(0xffffff, 0.9);
-    directional.position.set(5, 10, 7);
-    scene.add(directional);
-
-    // --- Status overlay -----------------------------------------------------
+    // --- Status overlay (room/corridor/door/stair/region counts) ---------
     const statusEl = host.createDiv();
-    statusEl.style.cssText =
-      "position:absolute;left:8px;bottom:6px;color:#9a9aad;font:11px sans-serif;" +
-      "background:rgba(20,20,30,0.6);padding:2px 6px;border-radius:3px;pointer-events:none;";
+    statusEl.style.cssText = `position:absolute;left:8px;bottom:6px;${OVERLAY_STYLE}`;
     host.appendChild(statusEl);
     this.statusEl = statusEl;
 
-    // --- Door-color legend --------------------------------------------------
+    // --- Door/stair icon legend --------------------------------------------
     // Static - doesn't depend on the loaded floor's data, so built once
-    // here rather than rebuilt per render like statusEl/actionsEl. Sits
-    // across the bottom next to the room/corridor/door/stair counts.
-    this.buildDoorLegend(host);
+    // here rather than rebuilt per render like statusEl/actionsEl. Always
+    // shown (see LEGEND_ITEMS' doc comment).
+    this.buildLegend(host);
 
     // --- Action buttons ("Generate Random Map" / "Finalize") --------------
     // Populated per-render by updateActionButtons() - empty (and both
@@ -155,24 +169,12 @@ class DungeonView extends ItemView {
 
     // --- Initial content: real floor data if we have a file, else placeholder
     await this.loadAndRender();
-
-    // --- Resize handling --------------------------------------------------
-    this.resizeObserver = new ResizeObserver(() => this.handleResize());
-    this.resizeObserver.observe(host);
-
-    // --- Render loop ------------------------------------------------------
-    const animate = () => {
-      this.frameHandle = requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
-    };
-    animate();
   }
 
   // --- Data loading ---------------------------------------------------------
 
   private async loadAndRender(): Promise<void> {
-    if (!this.scene) return;
+    if (!this.mapView) return;
 
     if (!this.file) {
       this.renderPlaceholder();
@@ -193,193 +195,22 @@ class DungeonView extends ItemView {
   }
 
   private renderPlaceholder(): void {
-    if (!this.scene) return;
-    this.disposeFloorGroup();
+    if (!this.mapView) return;
     this.data = null;
     this.updateActionButtons();
-
-    const group = new THREE.Group();
-    for (const room of PLACEHOLDER_ROOMS) {
-      const geometry = new THREE.BoxGeometry(...room.size);
-      const material = new THREE.MeshStandardMaterial({
-        color: room.color,
-        roughness: 0.7,
-        metalness: 0.05,
-      });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.set(...roomCenter(room));
-      group.add(mesh);
-    }
-    this.scene.add(group);
-    this.floorGroup = group;
-
-    this.setGridHelper(20);
-    this.frameCamera(20, 20, 6);
-    this.setStatus("Placeholder rooms - open a .dungeon file to see real data");
+    this.mapView.renderPlaceholder("Open a .dungeon file to see its map");
+    this.setStatus("No floor loaded");
   }
 
   private renderFloor(data: DungeonFloorData): void {
-    if (!this.scene) return;
-    this.disposeFloorGroup();
+    if (!this.mapView) return;
     this.data = data;
     this.updateActionButtons();
-    if (!this.gridTexture) this.gridTexture = createGridTexture();
-
-    const { walls, floors, ceilings, markers } = floorToRenderSpecs(data);
-    const group = new THREE.Group();
-
-    for (const wall of walls) {
-      group.add(this.buildWallMesh(wall));
-    }
-
-    for (const floor of floors) {
-      group.add(this.buildPlaneMesh(floor, this.gridTexture));
-    }
-    for (const ceiling of ceilings) {
-      group.add(this.buildCeilingGridMesh(ceiling));
-    }
-
-    for (const marker of markers) {
-      const geometry = new THREE.BoxGeometry(...marker.size);
-      const material = new THREE.MeshStandardMaterial({
-        color: marker.color,
-        roughness: 0.7,
-        metalness: 0.05,
-        transparent: marker.opacity !== undefined && marker.opacity < 1,
-        opacity: marker.opacity ?? 1,
-      });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.set(...marker.center);
-      group.add(mesh);
-    }
-
-    this.scene.add(group);
-    this.floorGroup = group;
-
-    const gridW = data.grid.width || 20;
-    const gridD = data.grid.depth || 20;
-    const gridH = data.grid.height || 6;
-    this.setGridHelper(Math.max(gridW, gridD));
-    this.frameCamera(gridW, gridD, gridH);
+    this.mapView.render(data);
     this.setStatus(
       `${data.rooms.length} rooms · ${data.corridors.length} corridors · ` +
         `${data.doors.length} doors · ${data.stairs.length} stairs · ${data.regions.length} regions`
     );
-  }
-
-  /**
-   * A full grid-cube wall block (Block Walls Plan.md step 4, 2026-07-31 -
-   * was a thin 0.15-unit panel before), grid-textured like the floor/
-   * ceiling so distances read consistently everywhere. BoxGeometry shares
-   * one material across all 6 faces; the repeat below is scaled for the
-   * two faces that actually face into a room (the wall's footprint side x
-   * height) - the other 1x1 side/top faces get the same repeat, which
-   * won't always tile perfectly against a neighboring block's texture, but
-   * isn't worth a second material just for that.
-   */
-  private buildWallMesh(spec: WallSpec): THREE.Mesh {
-    const geometry = new THREE.BoxGeometry(...spec.size);
-
-    let map: THREE.Texture | undefined;
-    if (this.gridTexture) {
-      const length = Math.max(spec.size[0], spec.size[2]);
-      const height = spec.size[1];
-      map = this.gridTexture.clone();
-      map.repeat.set(length, height);
-      map.needsUpdate = true;
-    }
-
-    const material = new THREE.MeshStandardMaterial({
-      color: spec.color,
-      roughness: 0.8,
-      metalness: 0.05,
-      map,
-    });
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.set(...spec.center);
-    return mesh;
-  }
-
-  /**
-   * A floor plane. Only floors call this now - as of 2026-07-31, ceilings
-   * no longer get a solid plane at all (see buildCeilingGridMesh() below),
-   * so the one-sided/backface-culling trick this used to need (visible
-   * from one direction only, so a top-down camera could see through
-   * ceilings and an under-the-map camera couldn't see floors from behind)
-   * is gone too - the floor is just always visible, from any angle.
-   */
-  private buildPlaneMesh(spec: PlaneSpec, gridTexture: THREE.CanvasTexture | null): THREE.Mesh {
-    const geometry = new THREE.PlaneGeometry(spec.size[0], spec.size[1]);
-    // Default plane normal is +Z; rotating -90 deg around X points it +Y (up).
-    geometry.rotateX(spec.facing === "up" ? -Math.PI / 2 : Math.PI / 2);
-
-    let map: THREE.Texture | null = null;
-    if (gridTexture) {
-      map = gridTexture.clone();
-      map.repeat.set(spec.size[0], spec.size[1]);
-      map.needsUpdate = true;
-    }
-
-    const material = new THREE.MeshStandardMaterial({
-      color: spec.color,
-      roughness: 0.85,
-      metalness: 0.02,
-      map: map ?? undefined,
-      side: THREE.DoubleSide,
-    });
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.set(...spec.center);
-    return mesh;
-  }
-
-  /**
-   * A unit-grid line overlay marking where a ceiling is, so a top-down
-   * view shows room outlines instead of nothing at all - added
-   * 2026-07-31. As of the same day, this is the *only* ceiling geometry -
-   * no solid plane is drawn any more (see buildPlaneMesh() above, and its
-   * dropped `kind === "ceiling"` branch), so the grid is visible from
-   * both above and below alike; there's nothing left to occlude it from
-   * underneath, and nothing left to hide it from above either.
-   *
-   * Built from real horizontal/vertical unit lines only (no diagonals)
-   * via `LineSegments`, matching the floor's grid texture - an earlier
-   * cut used a wireframed `PlaneGeometry`, whose 1-segment wireframe
-   * includes its diagonal, drawing one big distracting X across every
-   * room instead of a grid. `CEILING_GRID_EPSILON` nudges this mesh
-   * slightly off the room's true ceiling height purely to avoid
-   * coplanar z-fighting with any other geometry that might sit at
-   * exactly that height; `depthWrite: false` keeps neighboring rooms'
-   * grid lines from fighting each other in the depth buffer.
-   */
-  private buildCeilingGridMesh(spec: PlaneSpec): THREE.LineSegments {
-    const [width, depth] = spec.size;
-    const halfW = width / 2;
-    const halfD = depth / 2;
-    const stepsW = Math.max(1, Math.round(width));
-    const stepsD = Math.max(1, Math.round(depth));
-
-    const points: number[] = [];
-    for (let i = 0; i <= stepsW; i++) {
-      const x = -halfW + i;
-      points.push(x, 0, -halfD, x, 0, halfD);
-    }
-    for (let j = 0; j <= stepsD; j++) {
-      const z = -halfD + j;
-      points.push(-halfW, 0, z, halfW, 0, z);
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(points, 3));
-
-    const material = new THREE.LineBasicMaterial({
-      color: CEILING_WIRE_COLOR,
-      transparent: true,
-      opacity: 0.6,
-      depthWrite: false,
-    });
-    const mesh = new THREE.LineSegments(geometry, material);
-    mesh.position.set(spec.center[0], spec.center[1] + CEILING_GRID_EPSILON, spec.center[2]);
-    return mesh;
   }
 
   private setStatus(text: string): void {
@@ -387,24 +218,22 @@ class DungeonView extends ItemView {
   }
 
   /**
-   * Bottom-right legend explaining `DOOR_LEGEND`'s colors (wood/metal/
-   * stone/secret) - added 2026-07-31 so the door coloring in
-   * `doorColor()` is actually explained on screen instead of memorized.
-   * Sits at the opposite corner from the room/corridor/door/stair counts
+   * Bottom-right legend explaining `floor2dView.ts`'s door/stair icon
+   * language - always visible (see LEGEND_ITEMS' doc comment). Sits at
+   * the opposite corner from the room/corridor/door/stair counts
    * (bottom-left, via statusEl) so both read as one bottom status bar.
    */
-  private buildDoorLegend(host: HTMLElement): void {
+  private buildLegend(host: HTMLElement): void {
     const legendEl = host.createDiv();
     legendEl.style.cssText =
-      "position:absolute;right:8px;bottom:6px;display:flex;gap:10px;align-items:center;" +
-      "color:#c8c8da;font:11px sans-serif;background:rgba(20,20,30,0.6);padding:2px 6px;" +
-      "border-radius:3px;pointer-events:none;";
-    for (const entry of DOOR_LEGEND) {
+      `position:absolute;right:8px;bottom:6px;display:flex;gap:8px;align-items:center;` +
+      `flex-wrap:wrap;max-width:75%;justify-content:flex-end;${OVERLAY_STYLE}`;
+    host.appendChild(legendEl);
+    for (const entry of LEGEND_ITEMS) {
       const item = legendEl.createDiv();
-      item.style.cssText = "display:flex;align-items:center;gap:4px;";
+      item.style.cssText = "display:flex;align-items:center;gap:3px;";
       const swatch = item.createDiv();
-      const hex = "#" + entry.color.toString(16).padStart(6, "0");
-      swatch.style.cssText = `width:10px;height:10px;border-radius:2px;background:${hex};`;
+      swatch.innerHTML = entry.svg;
       item.createSpan({ text: entry.label });
     }
   }
@@ -421,7 +250,17 @@ class DungeonView extends ItemView {
   private updateActionButtons(): void {
     if (!this.actionsEl) return;
     this.actionsEl.empty();
-    if (!this.file || !this.data || this.data.finalized) return;
+    if (!this.file || !this.data) return;
+
+    // Export has no finalized-gate - a draft floor is just as worth
+    // printing/sharing as a finished one, unlike Generate (destructive)
+    // and Finalize (a one-way lock), which only make sense pre-finalize.
+    const exportBtn = this.actionsEl.createEl("button", { text: "Export SVG" });
+    exportBtn.style.cssText = ACTION_BUTTON_STYLE;
+    exportBtn.disabled = this.busy;
+    exportBtn.onclick = () => void this.exportFloorSvg();
+
+    if (this.data.finalized) return;
 
     const genBtn = this.actionsEl.createEl("button", { text: "Generate Random Map" });
     genBtn.style.cssText = ACTION_BUTTON_STYLE;
@@ -526,127 +365,59 @@ class DungeonView extends ItemView {
     await this.loadAndRender();
   }
 
-  // --- Scene bookkeeping ------------------------------------------------
+  // --- Export/print (rollout step 5) ---------------------------------------
+  //
+  // "2D Rendering Plan.md" left the export *file format* an open,
+  // non-blocking question: raw SVG (print straight from a browser, or let
+  // the OS turn it into a PDF) versus the plugin also rendering a PNG/PDF
+  // directly. Raw SVG is what's implemented - it's the format the in-app
+  // view already draws, so exporting it needs no rasterizer of its own,
+  // and it opens directly in Obsidian's own SVG viewer too. A PNG/PDF
+  // export can be layered on top of `renderFloorToSvgString()` later if
+  // it turns out to be needed.
 
-  private disposeFloorGroup(): void {
-    if (!this.floorGroup || !this.scene) return;
-    this.floorGroup.traverse((obj) => {
-      if (obj instanceof THREE.Mesh) {
-        obj.geometry.dispose();
-        disposeMaterial(obj.material);
+  /** The export SVG's file path, name-matched to `file` - `Floor 1.dungeon` exports to `Floor 1.svg` in the same folder. */
+  private exportFilePathFor(file: TFile): string {
+    const folder = file.parent && file.parent.path ? `${file.parent.path}/` : "";
+    return `${folder}${file.basename}.svg`;
+  }
+
+  /** "Export SVG": serializes the currently loaded floor to a standalone SVG file (map + always-on legend + status line), writing over any previous export at the same path. */
+  private async exportFloorSvg(): Promise<void> {
+    if (!this.file || !this.data || this.busy) return;
+
+    this.busy = true;
+    this.updateActionButtons();
+    try {
+      const statusText =
+        `${this.data.rooms.length} rooms \u00b7 ${this.data.corridors.length} corridors \u00b7 ` +
+        `${this.data.doors.length} doors \u00b7 ${this.data.stairs.length} stairs \u00b7 ${this.data.regions.length} regions`;
+      const svgMarkup = renderFloorToSvgString(this.data, {
+        legend: LEGEND_ITEMS,
+        statusText,
+        title: this.file.basename,
+      });
+      const exportPath = this.exportFilePathFor(this.file);
+      const existing = this.app.vault.getAbstractFileByPath(exportPath);
+      if (existing instanceof TFile) {
+        await this.app.vault.modify(existing, svgMarkup);
+      } else {
+        await this.app.vault.create(exportPath, svgMarkup);
       }
-    });
-    this.scene.remove(this.floorGroup);
-    this.floorGroup = null;
-  }
-
-  private setGridHelper(span: number): void {
-    if (!this.scene) return;
-    if (this.gridHelper) {
-      this.scene.remove(this.gridHelper);
-      this.gridHelper.dispose();
-      this.gridHelper = null;
+      new Notice(`Exported map to "${exportPath}".`);
+    } catch (e) {
+      console.error("[DungeonCartographer] Failed to export map:", e);
+      new Notice("Failed to export map - see console for details.");
+    } finally {
+      this.busy = false;
+      this.updateActionButtons();
     }
-    const divisions = Math.max(1, Math.round(span));
-    const helper = new THREE.GridHelper(span, divisions, 0x444466, 0x2a2a3a);
-    helper.position.set(span / 2, 0, span / 2);
-    this.scene.add(helper);
-    this.gridHelper = helper;
-  }
-
-  /**
-   * Point the camera at the footprint's centre, backed off enough to see
-   * it all. World Y now equals dungeon z directly (no render-only vertical
-   * offset - see renderFloor.ts) - the grid helper (the tabletop
-   * reference) at y=0 IS the grid's own true floor, so framing just needs
-   * the real grid height, no extra shift.
-   */
-  private frameCamera(gridW: number, gridD: number, gridH: number): void {
-    if (!this.camera || !this.controls) return;
-    const maxSpan = Math.max(gridW, gridD, 1);
-    const target = new THREE.Vector3(gridW / 2, gridH / 2, gridD / 2);
-    this.camera.position.set(
-      gridW / 2 + maxSpan * 0.6,
-      gridH * 1.5 + maxSpan * 0.5,
-      gridD / 2 + maxSpan * 0.9
-    );
-    this.camera.lookAt(target);
-    this.controls.target.copy(target);
-    this.controls.update();
-  }
-
-  private handleResize(): void {
-    if (!this.renderer || !this.camera) return;
-    const host = this.contentEl;
-    const width = host.clientWidth;
-    const height = host.clientHeight;
-    if (width === 0 || height === 0) return;
-
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
-    this.renderer.setSize(width, height, false);
   }
 
   async onClose(): Promise<void> {
-    if (this.frameHandle) cancelAnimationFrame(this.frameHandle);
-    this.resizeObserver?.disconnect();
-    this.resizeObserver = null;
-    this.controls?.dispose();
-    this.controls = null;
-
-    this.disposeFloorGroup();
-    this.gridHelper?.dispose();
-    this.gridHelper = null;
-    this.gridTexture?.dispose();
-    this.gridTexture = null;
-
-    // Release GPU resources for anything else left in the scene.
-    this.scene?.traverse((obj) => {
-      if (obj instanceof THREE.Mesh) {
-        obj.geometry.dispose();
-        disposeMaterial(obj.material);
-      }
-    });
-    this.renderer?.dispose();
-    this.renderer = null;
-    this.scene = null;
-    this.camera = null;
+    this.mapView?.destroy();
+    this.mapView = null;
   }
-}
-
-/** Disposes a mesh's material(s) and any texture maps on them (grid
- * texture clones), so repeated re-renders don't leak GPU resources. */
-function disposeMaterial(material: THREE.Material | THREE.Material[]): void {
-  const materials = Array.isArray(material) ? material : [material];
-  for (const m of materials) {
-    if (m instanceof THREE.MeshStandardMaterial) {
-      m.map?.dispose();
-    }
-    m.dispose();
-  }
-}
-
-/** A simple 1-unit grid-line tile, cloned and repeat-scaled per plane so
- * each square lines up exactly with a 5' grid cube. White background lets
- * the plane's own material colour multiply through unaffected; the border
- * shows as a slightly darker line. */
-function createGridTexture(): THREE.CanvasTexture {
-  const size = 64;
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d");
-  if (ctx) {
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, size, size);
-    ctx.strokeStyle = "#00000055";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(0, 0, size, size);
-  }
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.wrapS = THREE.RepeatWrapping;
-  texture.wrapT = THREE.RepeatWrapping;
-  return texture;
 }
 
 // ---------------------------------------------------------------------------
@@ -668,11 +439,41 @@ export default class DungeonCartographerPlugin extends Plugin {
       callback: () => this.activateView(),
     });
 
+    this.addCommand({
+      id: "reset-settings-to-defaults",
+      name: "Reset Settings to Defaults",
+      callback: () => this.resetSettingsToDefaults(),
+    });
+
     this.addRibbonIcon("map", "Open Dungeon Cartographer", () => this.activateView());
   }
 
   async onunload(): Promise<void> {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+  }
+
+  /**
+   * Overwrites every file in the vault's `Dungeon Cartographer Settings/`
+   * folder with the plugin's shipped default, creating the folder first
+   * if needed - see `settingsSync.ts` and "Dungeon Cartographer Settings
+   * Plan.md". No confirmation prompt and no backup by design (decided
+   * 2026-09-18): this is the "start over" command, and anything hand-
+   * edited there needs to be backed up (git/sync history) beforehand.
+   */
+  private async resetSettingsToDefaults(): Promise<void> {
+    const pluginDir = this.manifest.dir;
+    if (!pluginDir) {
+      new Notice("Dungeon Cartographer: couldn't resolve the plugin's own folder.");
+      return;
+    }
+
+    try {
+      const copied = await copySettingsDefaults(this.app.vault.adapter, pluginDir);
+      new Notice(`Dungeon Cartographer: reset ${copied.length} settings file${copied.length === 1 ? "" : "s"} to defaults.`);
+    } catch (err) {
+      console.error(err);
+      new Notice("Dungeon Cartographer: failed to reset settings - see console for details.");
+    }
   }
 
   /**

@@ -61,6 +61,16 @@ export interface DungeonCorridor {
  * `doorGapCells()` below to get every cell it occupies, not just the
  * first. A missing `width` (an older file) is treated as `1` - see
  * `normalizeDungeonFloor`.
+ *
+ * `locked`/`trapped`/`stuck` (added 2026-09-05 - see Physical vs Content
+ * Split.md's amendment and 2D Rendering Plan.md) - three independent
+ * booleans, any combination possible (a door can be all three, or none).
+ * Promoted from content to physical after actual play showed that looking
+ * these up per door slowed down drawing/placing the physical dungeon at
+ * the table. The lock's DC, the trap's mechanism/DC/effect, and the stuck
+ * door's break-DC modifier stay content, in the door's linked note - only
+ * the yes/no lives here. A missing key (an older file) defaults to
+ * `false` - see `normalizeDungeonFloor`.
  */
 export interface DungeonDoor {
   id: number;
@@ -70,6 +80,9 @@ export interface DungeonDoor {
   material: string;
   secret: boolean;
   width: number;
+  locked: boolean;
+  trapped: boolean;
+  stuck: boolean;
 }
 
 /**
@@ -187,7 +200,16 @@ function normalizeDungeonFloor(raw: unknown): DungeonFloorData {
     // A missing `width` (any file written before 2026-07-31) defaults to a
     // normal 5' door, same "editable by default"-style leniency as
     // `finalized` below - older data shouldn't need a manual upgrade.
-    doors: (r.doors ?? []).map((d) => ({ ...d, width: normalizeDoorWidth(d.width) })),
+    doors: (r.doors ?? []).map((d) => ({
+      ...d,
+      width: normalizeDoorWidth(d.width),
+      // A missing key (any file written before 2026-09-05) defaults to
+      // `false` - same "editable/renderable by default" leniency as
+      // `width` above.
+      locked: d.locked === true,
+      trapped: d.trapped === true,
+      stuck: d.stuck === true,
+    })),
     stairs: r.stairs ?? [],
     regions: r.regions ?? [],
     // Missing key => not finalized, per the "editable by default" decision
