@@ -10,10 +10,12 @@ Does **not** include `maxAttempts`, `shrinkAfter`, `corridorMaxSearchCost`, `min
 
 | Setting | Value |
 | --- | --- |
-| doorMaterials | wood, metal, stone |
+| doorMaterials | wood, metal, stone, archway, portcullis |
 | specialKinds | (none) |
 
 `specialKinds` is a comma-separated list of optional per-dungeon special rooms, e.g. `boss`. Empty by default.
+
+**Archway/portcullis added 2026-09-25** — see "Dungeon Generation/Door Notes and Map Hover Plan.md" Part C. `generate.ts`'s actual roll weights them ~85% wood/metal/stone, ~15% archway+portcullis combined (`GenerateConfig.doorMaterialWeights`); this row is still descriptive only, not read by generation code (see this file's own header - Plan step 6 is what would make it live).
 
 ---
 

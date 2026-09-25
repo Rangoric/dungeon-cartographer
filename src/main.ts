@@ -1,10 +1,20 @@
-import { ItemView, Notice, Plugin, TFile, ViewStateResult, WorkspaceLeaf } from "obsidian";
-import { parseDungeonFloor, type DungeonFloorData } from "./dungeonData";
+import { ItemView, Notice, Plugin, TFile, TFolder, ViewStateResult, WorkspaceLeaf } from "obsidian";
+import { parseDungeonFloor, type DungeonDoor, type DungeonFloorData } from "./dungeonData";
 import { createFloor2DView, renderFloorToSvgString, type Floor2DView } from "./floor2dView";
-import { generateFloor, configFromFloorSetup } from "./generate";
+import { generateFloor, configFromFloorSetup, Rng } from "./generate";
 import { parseFloorSetup, DEFAULT_FLOOR_SETUP, type FloorSetup } from "./floorSetup";
-import { copySettingsDefaults } from "./settingsSync";
+import { copySettingsDefaults, SETTINGS_FOLDER_NAME } from "./settingsSync";
 import { SETTINGS_DEFAULT_FILES } from "./settingsDefaults";
+import { parseLockTrapRules, DEFAULT_LOCK_TRAP_RULES, type LockTrapRules } from "./lockTrapRules";
+import {
+  buildDoorNoteMarkdown,
+  doorNeedsNote,
+  doorNotePathFor,
+  doorsFolderPathFor,
+  pickTrapFlavor,
+  rollDoorChallengeLevel,
+} from "./doorNotes";
+import { buildCorridorStubMarkdown, corridorNotePathFor, noteHoverExcerpt } from "./entityNotes";
 
 // 2026-09-05: the 3D Three.js viewer (OrbitControls, WebGLRenderer, the
 // whole scene-graph approach) is retired in favor of a flat top-down SVG
@@ -65,6 +75,14 @@ const LEGEND_ITEMS: { svg: string; label: string }[] = [
   {
     svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111"/><rect x="3" y="7" width="16" height="8" fill="#d8d3c8" stroke="#6b6558" stroke-width="1.4"/></svg>',
     label: "Stone door",
+  },
+  {
+    svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111"/><rect x="3" y="7" width="16" height="8" fill="#ffffff" stroke="#cccccc" stroke-width="1.4"/></svg>',
+    label: "Archway",
+  },
+  {
+    svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111"/><rect x="3" y="7" width="16" height="8" fill="#5f6b74" stroke="#2e363c" stroke-width="1.4"/><line x1="8" y1="7" x2="8" y2="15" stroke="#c9d3da" stroke-width="1"/><line x1="14" y1="7" x2="14" y2="15" stroke="#c9d3da" stroke-width="1"/></svg>',
+    label: "Portcullis",
   },
   {
     svg: '<svg width="18" height="18" viewBox="0 0 22 22"><rect width="22" height="22" fill="#111111"/><rect x="3" y="7" width="16" height="8" fill="#c9a876" stroke="#6b4a24" stroke-width="1.4"/><circle cx="11" cy="11" r="2.6" fill="#1c1c1c"/></svg>',
@@ -145,7 +163,10 @@ class DungeonView extends ItemView {
     // --- The SVG map itself, filling the pane ------------------------------
     const mapHost = host.createDiv();
     mapHost.style.cssText = "position:absolute;inset:0;";
-    this.mapView = createFloor2DView(mapHost);
+    this.mapView = createFloor2DView(mapHost, {
+      onOpenEntity: (owner) => void this.openEntityNote(owner),
+      onHoverEntity: (owner) => void this.handleHoverEntity(owner),
+    });
 
     // --- Status overlay (room/corridor/door/stair/region counts) ---------
     const statusEl = host.createDiv();
@@ -284,6 +305,122 @@ class DungeonView extends ItemView {
     return `${folder}${file.basename} Setup.md`;
   }
 
+  // --- Click-to-open-note & note-backed hover ("Door Notes and Map Hover
+  // Plan.md" Part B3, B1.2) -------------------------------------------
+  //
+  // One resolver, reused by both the `onOpenEntity` click handler and the
+  // `onHoverEntity` stage-2 hover handler below - Part B3's whole point.
+  // Rooms are the one asymmetry: their notes predate this plan and are
+  // name-based (`Room <NN> - <Name>.md`), not id-keyed, so they need a
+  // prefix-match against real files rather than a path this can build
+  // outright the way `doorNotePathFor`/`corridorNotePathFor` can. Stairs
+  // are out of scope for both - `floor2dView.ts`'s `drawStairIcon` has no
+  // interactive hit-area yet, so neither callback ever fires with
+  // `kind: "stair"` today.
+
+  /**
+   * Resolves an entity to its existing note file, or `null` if it doesn't
+   * have one yet - never creates anything (compare `openEntityNote`'s
+   * corridor branch, the one case that does). Doors/corridors use their
+   * deterministic id-keyed path (A2/B3); rooms prefix-match `Room <id>`
+   * (zero-padded or not) against real files directly inside the floor's
+   * own folder, since room notes live alongside the `.dungeon` file
+   * itself, not in an id-keyed subfolder like `Doors/`/`Corridors/`.
+   */
+  private resolveExistingNoteFile(
+    file: TFile,
+    owner: { kind: "room" | "corridor" | "door"; id: number }
+  ): TFile | null {
+    const folder = file.parent && file.parent.path ? `${file.parent.path}/` : "";
+
+    if (owner.kind === "door") {
+      const noteFile = this.app.vault.getAbstractFileByPath(doorNotePathFor(folder, file.basename, owner.id));
+      return noteFile instanceof TFile ? noteFile : null;
+    }
+
+    if (owner.kind === "corridor") {
+      const noteFile = this.app.vault.getAbstractFileByPath(corridorNotePathFor(folder, file.basename, owner.id));
+      return noteFile instanceof TFile ? noteFile : null;
+    }
+
+    // owner.kind === "room"
+    if (!(file.parent instanceof TFolder)) return null;
+    const pattern = new RegExp(`^Room\s+0*${owner.id}(?:\s|$)`, "i");
+    for (const child of file.parent.children) {
+      if (child instanceof TFile && pattern.test(child.basename)) return child;
+    }
+    return null;
+  }
+
+  /**
+   * Handles a click on a room/door/corridor SVG element (`onOpenEntity`,
+   * wired in `onOpen()`). Rooms and doors only ever open an *existing*
+   * note - a plain, unflagged door has nothing content-layer to say (Plan
+   * A1), and a room with no note yet just means the Room Content pass
+   * hasn't reached it, not something this click should paper over.
+   * Corridors are the one on-demand case: they have no physical flag to
+   * drive automatic generation the way doors do, so the first click both
+   * creates a minimal stub note and opens it (Plan B3's "on-demand, not
+   * auto-generated" framing).
+   */
+  private async openEntityNote(owner: { kind: "room" | "corridor" | "door"; id: number }): Promise<void> {
+    if (!this.file) return;
+    const file = this.file;
+
+    try {
+      let noteFile = this.resolveExistingNoteFile(file, owner);
+
+      if (!noteFile && owner.kind === "corridor") {
+        const folder = file.parent && file.parent.path ? `${file.parent.path}/` : "";
+        const corridorsFolderPath = `${folder}${file.basename}/Corridors`;
+        if (!(this.app.vault.getAbstractFileByPath(corridorsFolderPath) instanceof TFolder)) {
+          await this.app.vault.createFolder(corridorsFolderPath);
+        }
+        noteFile = await this.app.vault.create(
+          corridorNotePathFor(folder, file.basename, owner.id),
+          buildCorridorStubMarkdown(owner.id)
+        );
+      }
+
+      if (!noteFile) {
+        const message =
+          owner.kind === "door"
+            ? `Door ${owner.id} isn't locked, trapped, or stuck - it has no note.`
+            : `No note found for Room ${owner.id} yet - the Room Content pass hasn't reached it.`;
+        new Notice(message);
+        return;
+      }
+
+      await this.app.workspace.getLeaf(true).openFile(noteFile);
+    } catch (e) {
+      console.error("[DungeonCartographer] Failed to open/create a note for", owner, e);
+      new Notice("Couldn't open that note - see console for details.");
+    }
+  }
+
+  /**
+   * Stage-2 hover (Part B1.2): on `onHoverEntity`, resolves whatever note
+   * the hovered entity already has (never creates one - hover must stay
+   * side-effect-free) and, if it exists, reads it, extracts a short
+   * excerpt (`noteHoverExcerpt`), and feeds it to the view so it can
+   * append it to the still-showing tooltip - `setHoverNoteExcerpt` itself
+   * guards against a stale result arriving after the pointer's moved on.
+   * A `null` owner (pointerleave) is a no-op here; the view already hid
+   * its own tooltip.
+   */
+  private async handleHoverEntity(owner: { kind: "room" | "corridor" | "door"; id: number } | null): Promise<void> {
+    if (!owner || !this.file || !this.mapView) return;
+    const noteFile = this.resolveExistingNoteFile(this.file, owner);
+    if (!noteFile) return;
+
+    try {
+      const content = await this.app.vault.cachedRead(noteFile);
+      this.mapView?.setHoverNoteExcerpt(owner, noteHoverExcerpt(content));
+    } catch (e) {
+      console.warn("[DungeonCartographer] Could not read note for hover excerpt:", e);
+    }
+  }
+
   /** Reads and parses the open file's paired Setup file, falling back to the standard 36x36 default if it's missing or unreadable. */
   private async loadFloorSetup(): Promise<FloorSetup> {
     if (!this.file) return { ...DEFAULT_FLOOR_SETUP };
@@ -294,6 +431,87 @@ class DungeonView extends ItemView {
     } catch (e) {
       console.warn("[DungeonCartographer] Could not read floor Setup file, using defaults:", e);
       return { ...DEFAULT_FLOOR_SETUP };
+    }
+  }
+
+  // --- Door content notes (Locks & Traps Content Plan, Plan step 3) -------
+  //
+  // Turns a freshly generated floor's flagged (locked/trapped/stuck) doors
+  // into real content: a rolled challenge level, DC(s) looked up against
+  // the vault's `Lock, Trap & Stuck Door DCs.md` settings file, and a
+  // random trap flavor from `Sample Traps.md` - written one note per
+  // flagged door to `Floor N/Doors/Door <id>.md`. See "Dungeon Generation/
+  // Locks & Traps Content Plan.md" and "Door Notes and Map Hover Plan.md"
+  // Part A. The pure roll/lookup/markdown-building logic lives in
+  // `doorNotes.ts`; this is just the vault I/O around it.
+
+  /** Reads and parses the vault's live `Lock, Trap & Stuck Door DCs.md` settings file, falling back to `DEFAULT_LOCK_TRAP_RULES` if it's missing or unreadable - same leniency as `loadFloorSetup`. */
+  private async loadLockTrapRules(): Promise<LockTrapRules> {
+    const file = this.app.vault.getAbstractFileByPath(`${SETTINGS_FOLDER_NAME}/Lock, Trap & Stuck Door DCs.md`);
+    if (!(file instanceof TFile)) return DEFAULT_LOCK_TRAP_RULES;
+    try {
+      return parseLockTrapRules(await this.app.vault.read(file));
+    } catch (e) {
+      console.warn("[DungeonCartographer] Could not read Lock, Trap & Stuck Door DCs settings file, using defaults:", e);
+      return DEFAULT_LOCK_TRAP_RULES;
+    }
+  }
+
+  /** Reads the vault's live `Sample Traps.md` settings file's raw text - `""` if it's missing or unreadable, which `pickTrapFlavor` treats the same as "no entries" (its own fallback flavor, not a thrown error). */
+  private async loadSampleTrapsText(): Promise<string> {
+    const file = this.app.vault.getAbstractFileByPath(`${SETTINGS_FOLDER_NAME}/Sample Traps.md`);
+    if (!(file instanceof TFile)) return "";
+    try {
+      return await this.app.vault.read(file);
+    } catch (e) {
+      console.warn("[DungeonCartographer] Could not read Sample Traps settings file:", e);
+      return "";
+    }
+  }
+
+  /**
+   * Wipes and rebuilds `Floor N/Doors/` for the just-generated `doors`,
+   * writing one note per flagged (locked/trapped/stuck) door - the
+   * regeneration story resolved in Plan A4: full wipe/rebuild every time
+   * this runs, since it's only ever called from `generateRandomMap()`,
+   * itself only reachable while the floor isn't finalized. A floor with no
+   * flagged doors at all just ends up with no `Doors/` folder.
+   */
+  private async syncDoorNotes(file: TFile, floorLevel: number, doors: DungeonDoor[]): Promise<void> {
+    const folder = file.parent && file.parent.path ? `${file.parent.path}/` : "";
+    const doorsFolderPath = doorsFolderPathFor(folder, file.basename);
+
+    const existingFolder = this.app.vault.getAbstractFileByPath(doorsFolderPath);
+    if (existingFolder instanceof TFolder) {
+      await this.app.vault.delete(existingFolder, true);
+    }
+
+    const flaggedDoors = doors.filter(doorNeedsNote);
+    if (flaggedDoors.length === 0) return;
+
+    await this.app.vault.createFolder(doorsFolderPath);
+
+    const rules = await this.loadLockTrapRules();
+    const sampleTrapsText = await this.loadSampleTrapsText();
+    // A fresh RNG, not the floor's own generation seed - this roll's
+    // result is content (Plan A3), not persisted to the `.dungeon` schema,
+    // so it has no determinism requirement to share a seed with the
+    // physical layout roll (see Locks & Traps Content Plan's Plan step 3
+    // open implementation question - resolved here as "separate roll").
+    const rng = new Rng(Date.now());
+
+    for (const door of flaggedDoors) {
+      const challengeLevel = rollDoorChallengeLevel(rng, floorLevel);
+      const trapFlavor = door.trapped ? pickTrapFlavor(rng, sampleTrapsText) : null;
+      const content = buildDoorNoteMarkdown({
+        door,
+        floorBasename: file.basename,
+        challengeLevel,
+        floorLevel,
+        rules,
+        trapFlavor,
+      });
+      await this.app.vault.create(doorNotePathFor(folder, file.basename, door.id), content);
     }
   }
 
@@ -314,11 +532,18 @@ class DungeonView extends ItemView {
 
     this.busy = true;
     try {
+      const file = this.file;
       const setup = await this.loadFloorSetup();
       const config = configFromFloorSetup(setup, { seed: Date.now() });
       const data = generateFloor(config);
       await this.writeFloorData(data);
-      new Notice(`Generated a new random map for "${this.file.basename}".`);
+      try {
+        await this.syncDoorNotes(file, setup.level, data.doors);
+      } catch (e) {
+        console.error("[DungeonCartographer] Failed to generate door notes:", e);
+        new Notice("Map generated, but door notes failed - see console for details.");
+      }
+      new Notice(`Generated a new random map for "${file.basename}".`);
     } catch (e) {
       console.error("[DungeonCartographer] Failed to generate a random map:", e);
       new Notice("Failed to generate a random map - see console for details.");

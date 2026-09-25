@@ -26,11 +26,16 @@
 // existing 3D-view behavior being carried over. That's not accurate - the
 // current (pre-2D) `main.ts` never actually implemented this, and the
 // `.dungeon` schema has no per-room/corridor note-link field to open in
-// the first place. `onOpenEntity` below is real, working plumbing (every
-// room/corridor floor rect is clickable and reports its owner), ready for
-// whenever that feature is actually designed - `main.ts` doesn't pass a
-// handler for it yet, so clicking a room/corridor is a no-op today,
-// same as it was before.
+// the first place. `onOpenEntity` below is real, working plumbing - every
+// room/corridor floor rect AND every door icon is clickable and reports
+// its owner (`"room" | "corridor" | "door"`) - and as of 2026-09-25
+// `main.ts` actually wires a handler for it (`openEntityNote`, see "Door
+// Notes and Map Hover Plan.md" Part B3): rooms/doors open an existing note
+// if one exists (never auto-created - a plain door or a room the Room
+// Content pass hasn't touched yet just shows a `Notice`), corridors
+// auto-create a minimal stub note on first click since they have no
+// physical flag to drive automatic generation. Stairs are deliberately
+// out of scope - no interactive hit-area exists on `drawStairIcon` yet.
 //
 // `renderFloorToSvgString()` near the bottom of this file is rollout step
 // 5 (export/print, "2D Rendering Plan.md") - a static, non-interactive
@@ -53,8 +58,12 @@ import {
   type FloorRect,
   doorFillColor,
   doorStrokeColor,
+  doorTooltipLabel,
+  roomTooltipLabel,
+  corridorTooltipLabel,
   SECRET_DOOR_LABEL_COLOR,
   TRAPPED_DOOR_STROKE,
+  PORTCULLIS_BAR_COLOR,
 } from "./floor2d";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -105,7 +114,7 @@ function computeBBox(specs: Floor2DSpecs, grid: { width: number; depth: number }
 }
 
 function drawFineGrid(parent: SVGGElement, bbox: BBox): void {
-  const g = svgEl("g", { stroke: "#000000", "stroke-opacity": 0.05 });
+  const g = svgEl("g", { stroke: "#000000", "stroke-opacity": 0.05, "pointer-events": "none" });
   const x0 = Math.ceil(bbox.minX);
   const x1 = Math.floor(bbox.minX + bbox.w);
   for (let gx = x0; gx <= x1; gx++) {
@@ -126,7 +135,7 @@ function drawPlainRects(parent: SVGGElement, rects: readonly GridRect[]): void {
 }
 
 function drawBoundaryLines(parent: SVGGElement, lines: readonly GridLine[]): void {
-  const g = svgEl("g", { "stroke-linecap": "square" });
+  const g = svgEl("g", { "stroke-linecap": "square", "pointer-events": "none" });
   for (const line of lines) {
     g.appendChild(
       svgEl("line", { x1: line.x1 * CS, y1: line.y1 * CS, x2: line.x2 * CS, y2: line.y2 * CS, stroke: line.color, "stroke-width": 1.6 })
@@ -135,9 +144,26 @@ function drawBoundaryLines(parent: SVGGElement, lines: readonly GridLine[]): voi
   parent.appendChild(g);
 }
 
-/** Same leaf-geometry/icon-placement math as the approved mockup's `draw_door_icon` (make_svgs2.py). */
-function drawDoorIcon(parent: SVGGElement, door: DoorIcon2D): void {
+/**
+ * Same leaf-geometry/icon-placement math as the approved mockup's
+ * `draw_door_icon` (make_svgs2.py). Draws into a fresh `<g>` (appended to
+ * `parent`, and returned) rather than appending straight to `parent` -
+ * lets the interactive view (`createFloor2DView`) attach hover listeners
+ * to one element per door instead of every mark separately. The static
+ * export path (`renderFloorToSvgString`) just discards the return value.
+ */
+function drawDoorIcon(parent: SVGGElement, door: DoorIcon2D): SVGGElement {
+  const g = svgEl("g");
   const { x0, y0, x1, y1 } = door.span;
+  // Invisible hit-area covering the door's full span (not just the leaf
+  // rect) - `pointer-events: all` is needed since a transparent fill is
+  // otherwise excluded from hit-testing under the default
+  // `pointer-events: visiblePainted`. Keeps hover reliable even over a
+  // thin gap between the leaf and a locked/stuck mark, rather than
+  // depending on the browser's implicit group-bbox enter/leave behavior.
+  const hit = svgEl("rect", { x: x0 * CS, y: y0 * CS, width: (x1 - x0) * CS, height: (y1 - y0) * CS, fill: "transparent" });
+  hit.style.pointerEvents = "all";
+  g.appendChild(hit);
   let leafX: number, leafY: number, leafW: number, leafH: number, cx: number, cy: number;
   if (door.crossesX) {
     const px0 = x0 * CS + 3;
@@ -171,10 +197,28 @@ function drawDoorIcon(parent: SVGGElement, door: DoorIcon2D): void {
   const fill = doorFillColor(door.material);
   const stroke = door.trapped ? TRAPPED_DOOR_STROKE : doorStrokeColor(door.material);
   const strokeWidth = door.trapped ? 2.2 : 1.4;
-  parent.appendChild(svgEl("rect", { x: leafX, y: leafY, width: leafW, height: leafH, fill, stroke, "stroke-width": strokeWidth }));
+  g.appendChild(svgEl("rect", { x: leafX, y: leafY, width: leafW, height: leafH, fill, stroke, "stroke-width": strokeWidth }));
+
+  if (door.material === "portcullis") {
+    // Lattice/hatch bars across the leaf, perpendicular to the opening's
+    // long axis - `doorFillColor`'s distinct slate-blue alone still reads
+    // too close to metal's grey at map scale (Door Notes and Map Hover
+    // Plan.md Part C6), so this is what actually reads as "gate" rather
+    // than "door".
+    const barCount = 3;
+    for (let i = 1; i <= barCount; i++) {
+      if (door.crossesX) {
+        const bx = leafX + (leafW * i) / (barCount + 1);
+        g.appendChild(svgEl("line", { x1: bx, y1: leafY, x2: bx, y2: leafY + leafH, stroke: PORTCULLIS_BAR_COLOR, "stroke-width": 1 }));
+      } else {
+        const by = leafY + (leafH * i) / (barCount + 1);
+        g.appendChild(svgEl("line", { x1: leafX, y1: by, x2: leafX + leafW, y2: by, stroke: PORTCULLIS_BAR_COLOR, "stroke-width": 1 }));
+      }
+    }
+  }
 
   if (door.locked) {
-    parent.appendChild(svgEl("circle", { cx, cy, r: 2.6, fill: "#1c1c1c" }));
+    g.appendChild(svgEl("circle", { cx, cy, r: 2.6, fill: "#1c1c1c" }));
   }
   if (door.stuck) {
     // 2026-09-06: a full corner-to-corner X across the leaf ("stuck" reads
@@ -182,8 +226,8 @@ function drawDoorIcon(parent: SVGGElement, door: DoorIcon2D): void {
     // jammed/zigzag mark. Donjon has no map icon for this state at all
     // (only descriptive text, e.g. "Stuck Simple Wooden Door"). Neutral
     // grey since being stuck is a nuisance, not a danger like a trap.
-    parent.appendChild(svgEl("line", { x1: leafX, y1: leafY, x2: leafX + leafW, y2: leafY + leafH, stroke: "#4a4a4a", "stroke-width": 1.3, "stroke-linecap": "round" }));
-    parent.appendChild(svgEl("line", { x1: leafX + leafW, y1: leafY, x2: leafX, y2: leafY + leafH, stroke: "#4a4a4a", "stroke-width": 1.3, "stroke-linecap": "round" }));
+    g.appendChild(svgEl("line", { x1: leafX, y1: leafY, x2: leafX + leafW, y2: leafY + leafH, stroke: "#4a4a4a", "stroke-width": 1.3, "stroke-linecap": "round" }));
+    g.appendChild(svgEl("line", { x1: leafX + leafW, y1: leafY, x2: leafX, y2: leafY + leafH, stroke: "#4a4a4a", "stroke-width": 1.3, "stroke-linecap": "round" }));
   }
   if (door.secret) {
     // 2026-09-06: an 'S' drawn last so it stays legible over the fill/
@@ -207,8 +251,10 @@ function drawDoorIcon(parent: SVGGElement, door: DoorIcon2D): void {
       transform: door.crossesX ? "" : `rotate(90 ${cx} ${cy})`,
     });
     label.textContent = "S";
-    parent.appendChild(label);
+    g.appendChild(label);
   }
+  parent.appendChild(g);
+  return g;
 }
 
 /** Donjon-style hatch bar - horizontal stripes = down (matches `floorsDown`; the schema has no "up" stair concept yet, see Dungeon Data Format.md). */
@@ -228,7 +274,15 @@ function drawStairIcon(parent: SVGGElement, stair: StairIcon2D): void {
   // embedded one already has its room's own RoomLabel2D nearby (see "2D
   // Rendering Plan.md"'s ceiling-height policy).
   if (!stair.embedded) {
-    const label = svgEl("text", { x: x0 + w / 2, y: y0 + h + 10, "font-size": 7.5, fill: "#111111", "text-anchor": "middle", "font-family": "sans-serif" });
+    const label = svgEl("text", {
+      x: x0 + w / 2,
+      y: y0 + h + 10,
+      "font-size": 7.5,
+      fill: "#111111",
+      "text-anchor": "middle",
+      "font-family": "sans-serif",
+      "pointer-events": "none",
+    });
     label.textContent = `${stair.heightFt}’ · DOWN ${stair.floorsDown}`;
     parent.appendChild(label);
   }
@@ -237,10 +291,27 @@ function drawStairIcon(parent: SVGGElement, stair: StairIcon2D): void {
 function drawRoomLabel(parent: SVGGElement, label: RoomLabel2D): void {
   const cx = label.cx * CS;
   const cy = label.cy * CS;
-  const idText = svgEl("text", { x: cx, y: cy + 3, fill: "#111111", "font-size": 11, "text-anchor": "middle", "font-family": "sans-serif", "font-weight": 600 });
+  const idText = svgEl("text", {
+    x: cx,
+    y: cy + 3,
+    fill: "#111111",
+    "font-size": 11,
+    "text-anchor": "middle",
+    "font-family": "sans-serif",
+    "font-weight": 600,
+    "pointer-events": "none",
+  });
   idText.textContent = String(label.id);
   parent.appendChild(idText);
-  const heightText = svgEl("text", { x: cx, y: cy + 14, fill: "#555555", "font-size": 8, "text-anchor": "middle", "font-family": "sans-serif" });
+  const heightText = svgEl("text", {
+    x: cx,
+    y: cy + 14,
+    fill: "#555555",
+    "font-size": 8,
+    "text-anchor": "middle",
+    "font-family": "sans-serif",
+    "pointer-events": "none",
+  });
   heightText.textContent = `${label.heightFt}’`;
   parent.appendChild(heightText);
 }
@@ -256,6 +327,7 @@ function drawHeightLabel(parent: SVGGElement, label: HeightLabel2D): void {
     fill: "#555555",
     "text-anchor": "middle",
     "font-family": "sans-serif",
+    "pointer-events": "none",
   };
   if (label.rotated) {
     attrs["dominant-baseline"] = "middle";
@@ -409,7 +481,16 @@ export interface Floor2DViewOptions {
    * Called when a room/corridor floor rect is clicked - see the module
    * header's note on why `main.ts` doesn't pass this yet.
    */
-  onOpenEntity?: (owner: { kind: "room" | "corridor"; id: number }) => void;
+  onOpenEntity?: (owner: { kind: "room" | "corridor" | "door"; id: number }) => void;
+  /**
+   * Stage-1/stage-2 map hover ("Door Notes and Map Hover Plan.md" Part B).
+   * Fired with the hovered entity on pointerenter, and `null` on
+   * pointerleave - `main.ts` uses this to kick off an async vault read for
+   * that entity's note (if one exists) and feed the result back through
+   * `Floor2DView.setHoverNoteExcerpt`. This view never touches the vault
+   * itself (same Obsidian-I/O-stays-in-main.ts split as `onOpenEntity`).
+   */
+  onHoverEntity?: (owner: { kind: "room" | "corridor" | "door"; id: number } | null) => void;
 }
 
 export interface Floor2DView {
@@ -417,6 +498,16 @@ export interface Floor2DView {
   render(data: DungeonFloorData): void;
   /** Shows a simple centered message instead of floor content (e.g. no file open, or a parse error). */
   renderPlaceholder(message: string): void;
+  /**
+   * Stage-2 hover (Part B1.2): appends a note-content excerpt to whichever
+   * tooltip is currently showing, but only if `owner` still matches the
+   * entity actually being hovered right now - by the time `main.ts`'s
+   * async vault read resolves, the pointer may have moved to a different
+   * entity or off the map entirely, and a stale result must not clobber
+   * (or resurrect) the wrong tooltip. A no-op (never hides/replaces the
+   * stage-1 physical line) when `owner` doesn't match, or `excerpt` is "".
+   */
+  setHoverNoteExcerpt(owner: { kind: "room" | "corridor" | "door"; id: number }, excerpt: string): void;
   /** Removes all listeners and the <svg> element itself - call from onClose. */
   destroy(): void;
 }
@@ -425,7 +516,8 @@ export interface Floor2DView {
  * Builds the SVG map view inside `host` - a single `<svg>` filling its
  * container, with mouse-drag pan, scroll-wheel zoom (centered on the
  * cursor), double-click-to-reset, and click-to-open-note plumbing on every
- * room/corridor floor rect (see `Floor2DViewOptions.onOpenEntity`).
+ * room/corridor floor rect and every door icon (see
+ * `Floor2DViewOptions.onOpenEntity`).
  */
 export function createFloor2DView(host: HTMLElement, options: Floor2DViewOptions = {}): Floor2DView {
   const svg = svgEl("svg", { width: "100%", height: "100%" });
@@ -433,6 +525,67 @@ export function createFloor2DView(host: HTMLElement, options: Floor2DViewOptions
   const content = svgEl("g");
   svg.appendChild(content);
   host.appendChild(svg);
+
+  // --- Hover tooltip (stage 1: physical-only door hover) --------------------
+  // Plain fixed-position HTML element, not SVG - `<title>` can't hold
+  // structured, styled content. Position follows the pointer via
+  // `pointermove`; content comes straight from `doorTooltipLabel()`
+  // (floor2d.ts), no note lookup - see "Door Notes and Map Hover Plan.md"
+  // Part B1 for the staging (physical-only now, note-backed content is a
+  // later stage) and B2 for why this lives outside the SVG tree.
+  if (getComputedStyle(host).position === "static") host.style.position = "relative";
+  const tooltip = document.createElement("div");
+  tooltip.style.cssText =
+    "position:absolute;pointer-events:none;z-index:1000;display:none;" +
+    "background:rgba(20,20,20,0.92);color:#f2f2f2;font:11px sans-serif;" +
+    "padding:4px 8px;border-radius:4px;white-space:pre-line;max-width:280px;";
+  host.appendChild(tooltip);
+
+  // Stage-2 hover state (Part B1.2) - which entity the tooltip is
+  // currently showing, and its stage-1 physical-only line on its own, so
+  // `setHoverNoteExcerpt` can append to it (or a later re-entry can
+  // overwrite it) without losing that base text. `currentHoverOwner` is
+  // also what makes a stale async note-read result (main.ts's vault read
+  // can easily outlive a quick mouse pass) safely ignorable.
+  let currentHoverOwner: { kind: "room" | "corridor" | "door"; id: number } | null = null;
+  let currentHoverPhysicalText = "";
+
+  function showTooltip(owner: { kind: "room" | "corridor" | "door"; id: number }, text: string, e: PointerEvent): void {
+    currentHoverOwner = owner;
+    currentHoverPhysicalText = text;
+    tooltip.textContent = text;
+    tooltip.style.display = "block";
+    moveTooltip(e);
+  }
+  function moveTooltip(e: PointerEvent): void {
+    // `getBoundingClientRect()` returns post-transform screen pixels, but
+    // `tooltip.style.left/top` are interpreted in `host`'s own local
+    // (pre-transform) coordinate space - if some ancestor applies a CSS
+    // scale (Obsidian's UI zoom does exactly this on its app root), a
+    // screen-pixel delta has to be divided back down by that scale before
+    // it's a valid local-space offset, or the tooltip drifts away from
+    // the cursor by however much the zoom differs from 100%. Falls back
+    // to 1 (no correction) if `host` has zero layout size.
+    const hostRect = host.getBoundingClientRect();
+    const scaleX = host.offsetWidth ? hostRect.width / host.offsetWidth : 1;
+    const scaleY = host.offsetHeight ? hostRect.height / host.offsetHeight : 1;
+    tooltip.style.left = `${(e.clientX - hostRect.left) / scaleX + 14}px`;
+    tooltip.style.top = `${(e.clientY - hostRect.top) / scaleY + 14}px`;
+  }
+  function hideTooltip(): void {
+    currentHoverOwner = null;
+    currentHoverPhysicalText = "";
+    tooltip.style.display = "none";
+  }
+
+  function sameOwner(a: { kind: string; id: number } | null, b: { kind: string; id: number }): boolean {
+    return a !== null && a.kind === b.kind && a.id === b.id;
+  }
+
+  function setHoverNoteExcerpt(owner: { kind: "room" | "corridor" | "door"; id: number }, excerpt: string): void {
+    if (!excerpt || !sameOwner(currentHoverOwner, owner)) return;
+    tooltip.textContent = `${currentHoverPhysicalText}\n${excerpt}`;
+  }
 
   // --- Pan/zoom -------------------------------------------------------------
   // Deliberately not using `setPointerCapture` - that would retarget the
@@ -509,7 +662,12 @@ export function createFloor2DView(host: HTMLElement, options: Floor2DViewOptions
   svg.addEventListener("wheel", onWheel, { passive: false });
   svg.addEventListener("dblclick", onDoubleClick);
 
-  function drawFloorRects(parent: SVGGElement, rects: readonly FloorRect[]): void {
+  function drawFloorRects(
+    parent: SVGGElement,
+    rects: readonly FloorRect[],
+    roomsById: ReadonlyMap<number, DungeonFloorData["rooms"][number]>,
+    corridorsById: ReadonlyMap<number, DungeonFloorData["corridors"][number]>
+  ): void {
     for (const r of rects) {
       const attrs: Record<string, string | number> = { x: r.x * CS, y: r.y * CS, width: r.w * CS, height: r.d * CS, fill: r.color };
       const el = svgEl("rect", attrs);
@@ -520,6 +678,40 @@ export function createFloor2DView(host: HTMLElement, options: Floor2DViewOptions
           if (dragMoved) return;
           options.onOpenEntity?.(owner);
         });
+        // Stage-1 hover - same physical-only tooltip treatment as doors
+        // (see doorTooltipLabel above). A room can have several floor
+        // rects (its own box plus any lobe regions) that all share one
+        // id, so every one of them resolves to the same tooltip text -
+        // fine, since they're all "the same room" from the hover's point
+        // of view. Freestanding-stair floor rects have no `owner` and so
+        // fall through this block entirely - stair hover isn't built yet.
+        if (owner.kind === "room") {
+          const room = roomsById.get(owner.id);
+          if (room) {
+            el.addEventListener("pointerenter", (e) => {
+              showTooltip(owner, roomTooltipLabel(room), e as PointerEvent);
+              options.onHoverEntity?.(owner);
+            });
+            el.addEventListener("pointermove", (e) => moveTooltip(e as PointerEvent));
+            el.addEventListener("pointerleave", () => {
+              hideTooltip();
+              options.onHoverEntity?.(null);
+            });
+          }
+        } else {
+          const corridor = corridorsById.get(owner.id);
+          if (corridor) {
+            el.addEventListener("pointerenter", (e) => {
+              showTooltip(owner, corridorTooltipLabel(corridor), e as PointerEvent);
+              options.onHoverEntity?.(owner);
+            });
+            el.addEventListener("pointermove", (e) => moveTooltip(e as PointerEvent));
+            el.addEventListener("pointerleave", () => {
+              hideTooltip();
+              options.onHoverEntity?.(null);
+            });
+          }
+        }
       }
       parent.appendChild(el);
     }
@@ -530,6 +722,7 @@ export function createFloor2DView(host: HTMLElement, options: Floor2DViewOptions
   }
 
   function render(data: DungeonFloorData): void {
+    hideTooltip();
     clear();
     resetView();
     const specs = floorTo2DSpecs(data);
@@ -538,18 +731,38 @@ export function createFloor2DView(host: HTMLElement, options: Floor2DViewOptions
 
     // A real filled background rect (not just CSS) so it survives export/print.
     content.appendChild(svgEl("rect", { x: bbox.minX * CS, y: bbox.minY * CS, width: bbox.w * CS, height: bbox.h * CS, fill: "#000000" }));
+    const roomsById = new Map(data.rooms.map((room) => [room.id, room] as const));
+    const corridorsById = new Map(data.corridors.map((corridor) => [corridor.id, corridor] as const));
     drawPlainRects(content, specs.wallRects);
-    drawFloorRects(content, specs.floorRects);
+    drawFloorRects(content, specs.floorRects, roomsById, corridorsById);
     drawPlainRects(content, specs.doorGapRects);
     drawFineGrid(content, bbox);
     drawBoundaryLines(content, specs.boundaryLines);
-    for (const door of specs.doors) drawDoorIcon(content, door);
+    for (const door of specs.doors) {
+      const doorGroup = drawDoorIcon(content, door);
+      doorGroup.style.cursor = "pointer";
+      const doorOwner = { kind: "door" as const, id: door.id };
+      doorGroup.addEventListener("pointerenter", (e) => {
+        showTooltip(doorOwner, doorTooltipLabel(door), e as PointerEvent);
+        options.onHoverEntity?.(doorOwner);
+      });
+      doorGroup.addEventListener("pointermove", (e) => moveTooltip(e as PointerEvent));
+      doorGroup.addEventListener("pointerleave", () => {
+        hideTooltip();
+        options.onHoverEntity?.(null);
+      });
+      doorGroup.addEventListener("click", () => {
+        if (dragMoved) return;
+        options.onOpenEntity?.(doorOwner);
+      });
+    }
     for (const label of specs.roomLabels) drawRoomLabel(content, label);
     for (const label of specs.corridorHeightLabels) drawHeightLabel(content, label);
     for (const stair of specs.stairs) drawStairIcon(content, stair);
   }
 
   function renderPlaceholder(message: string): void {
+    hideTooltip();
     clear();
     resetView();
     svg.setAttribute("viewBox", `0 0 ${20 * CS} ${10 * CS}`);
@@ -573,7 +786,8 @@ export function createFloor2DView(host: HTMLElement, options: Floor2DViewOptions
     svg.removeEventListener("wheel", onWheel);
     svg.removeEventListener("dblclick", onDoubleClick);
     host.removeChild(svg);
+    host.removeChild(tooltip);
   }
 
-  return { render, renderPlaceholder, destroy };
+  return { render, renderPlaceholder, setHoverNoteExcerpt, destroy };
 }

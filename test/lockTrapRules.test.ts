@@ -1,0 +1,169 @@
+import { describe, it, expect } from "vitest";
+import {
+  parseLockTrapRules,
+  DEFAULT_LOCK_TRAP_RULES,
+  lookupLockedDoorDC,
+  lookupTrappedDoorDC,
+  lookupStuckDoorBreakDC,
+} from "../src/lockTrapRules";
+
+const REAL_FILE_TEXT = `
+Some intro prose about where this table lives and how it's used.
+
+## Locked doors — Open Lock DC
+
+| Floor Level | Lock Quality | Open Lock DC |
+| --- | --- | --- |
+| 1–5   | Very simple | 20 |
+| 6–10  | Average     | 25 |
+| 11–15 | Good        | 30 |
+| 16–20 | Superior    | 40 |
+
+## Trapped doors — Search / Disable Device DC
+
+Search DC = Disable Device DC = 19 + Level
+
+| Floor Level | Search / Disable Device DC |
+| --- | --- |
+| 1  | 20 |
+| 5  | 24 |
+| 10 | 29 |
+| 15 | 34 |
+| 20 | 39 |
+
+## Stuck doors — Strength check DC to force
+
+| Condition | Break DC |
+| --- | --- |
+| Stuck only | 15 |
+| Stuck + Locked | 20 |
+| Stuck + Trapped | 20 |
+| Stuck + Locked + Trapped | 25 |
+`;
+
+describe("parseLockTrapRules", () => {
+  it("parses all three tables from the real file shape", () => {
+    expect(parseLockTrapRules(REAL_FILE_TEXT)).toEqual(DEFAULT_LOCK_TRAP_RULES);
+  });
+
+  it("is tolerant of extra spacing and a lowercase hyphen instead of an en dash", () => {
+    const text = `| Floor Level | Lock Quality | Open Lock DC |\n| --- | --- | --- |\n|  1-5  |   Very simple   |  20  |`;
+    expect(parseLockTrapRules(text).lockedDoorDC).toEqual([
+      { minLevel: 1, maxLevel: 5, quality: "Very simple", dc: 20 },
+    ]);
+  });
+
+  it("falls back to the default locked-door table when it's missing entirely", () => {
+    const text = `# Nothing here but prose.`;
+    expect(parseLockTrapRules(text).lockedDoorDC).toEqual(DEFAULT_LOCK_TRAP_RULES.lockedDoorDC);
+  });
+
+  it("falls back to the default trapped-door table on malformed rows", () => {
+    const text = `| Floor Level | Search / Disable Device DC |\n| --- | --- |\n| one | twenty |`;
+    expect(parseLockTrapRules(text).trappedDoorDC).toEqual(DEFAULT_LOCK_TRAP_RULES.trappedDoorDC);
+  });
+
+  it("falls back per-condition on the stuck-door table when only some rows are present", () => {
+    const text = `| Condition | Break DC |\n| --- | --- |\n| Stuck only | 12 |`;
+    expect(parseLockTrapRules(text).stuckDoorBreakDC).toEqual({
+      stuckOnly: 12,
+      stuckLocked: DEFAULT_LOCK_TRAP_RULES.stuckDoorBreakDC.stuckLocked,
+      stuckTrapped: DEFAULT_LOCK_TRAP_RULES.stuckDoorBreakDC.stuckTrapped,
+      stuckLockedTrapped: DEFAULT_LOCK_TRAP_RULES.stuckDoorBreakDC.stuckLockedTrapped,
+    });
+  });
+
+  it("is case-insensitive on stuck-door condition names", () => {
+    const text = `| Condition | Break DC |\n| --- | --- |\n| STUCK ONLY | 12 |`;
+    expect(parseLockTrapRules(text).stuckDoorBreakDC.stuckOnly).toBe(12);
+  });
+
+  it("ignores rows with the wrong column count rather than misreading them", () => {
+    const text = `| Floor Level | Lock Quality | Open Lock DC |\n| --- | --- | --- |\n| 1–5 | Very simple |`;
+    expect(parseLockTrapRules(text).lockedDoorDC).toEqual(DEFAULT_LOCK_TRAP_RULES.lockedDoorDC);
+  });
+
+  it("never throws on completely empty input", () => {
+    expect(() => parseLockTrapRules("")).not.toThrow();
+    expect(parseLockTrapRules("")).toEqual(DEFAULT_LOCK_TRAP_RULES);
+  });
+
+  it("does not pick up unrelated tables elsewhere in the file as one of its own", () => {
+    const text = `| Setting | Value |\n| --- | --- |\n| Grid Size | 34 × 34 |\n| Level | 7 |`;
+    expect(parseLockTrapRules(text)).toEqual(DEFAULT_LOCK_TRAP_RULES);
+  });
+});
+
+describe("lookupLockedDoorDC", () => {
+  it("returns the tier containing the level", () => {
+    expect(lookupLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 8)).toEqual({
+      minLevel: 6,
+      maxLevel: 10,
+      quality: "Average",
+      dc: 25,
+    });
+  });
+
+  it("returns the boundary tiers at exact edges", () => {
+    expect(lookupLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 1).dc).toBe(20);
+    expect(lookupLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 20).dc).toBe(40);
+  });
+
+  it("clamps below the lowest tier rather than returning undefined", () => {
+    expect(lookupLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 0).dc).toBe(20);
+  });
+
+  it("clamps above the highest tier rather than returning undefined", () => {
+    expect(lookupLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 99).dc).toBe(40);
+  });
+});
+
+describe("lookupTrappedDoorDC", () => {
+  it("returns the exact DC at a tabled level", () => {
+    expect(lookupTrappedDoorDC(DEFAULT_LOCK_TRAP_RULES, 10)).toBe(29);
+  });
+
+  it("interpolates between two tabled levels, matching the 19 + Level formula", () => {
+    expect(lookupTrappedDoorDC(DEFAULT_LOCK_TRAP_RULES, 3)).toBe(22);
+    expect(lookupTrappedDoorDC(DEFAULT_LOCK_TRAP_RULES, 12)).toBe(31);
+  });
+
+  it("extrapolates below the lowest point along the same slope", () => {
+    expect(lookupTrappedDoorDC(DEFAULT_LOCK_TRAP_RULES, 0)).toBe(19);
+  });
+
+  it("extrapolates above the highest point along the same slope", () => {
+    expect(lookupTrappedDoorDC(DEFAULT_LOCK_TRAP_RULES, 21)).toBe(40);
+  });
+});
+
+describe("lookupStuckDoorBreakDC", () => {
+  it("returns stuckOnly when neither locked nor trapped", () => {
+    expect(lookupStuckDoorBreakDC(DEFAULT_LOCK_TRAP_RULES, { locked: false, trapped: false })).toBe(15);
+  });
+
+  it("returns stuckLocked when locked but not trapped", () => {
+    expect(lookupStuckDoorBreakDC(DEFAULT_LOCK_TRAP_RULES, { locked: true, trapped: false })).toBe(20);
+  });
+
+  it("returns stuckTrapped when trapped but not locked", () => {
+    expect(lookupStuckDoorBreakDC(DEFAULT_LOCK_TRAP_RULES, { locked: false, trapped: true })).toBe(20);
+  });
+
+  it("returns stuckLockedTrapped when both", () => {
+    expect(lookupStuckDoorBreakDC(DEFAULT_LOCK_TRAP_RULES, { locked: true, trapped: true })).toBe(25);
+  });
+});
+
+describe("DEFAULT_LOCK_TRAP_RULES", () => {
+  it("matches the live vault file's current values", () => {
+    expect(DEFAULT_LOCK_TRAP_RULES.lockedDoorDC).toHaveLength(4);
+    expect(DEFAULT_LOCK_TRAP_RULES.trappedDoorDC).toHaveLength(5);
+    expect(DEFAULT_LOCK_TRAP_RULES.stuckDoorBreakDC).toEqual({
+      stuckOnly: 15,
+      stuckLocked: 20,
+      stuckTrapped: 20,
+      stuckLockedTrapped: 25,
+    });
+  });
+});

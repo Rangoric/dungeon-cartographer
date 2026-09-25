@@ -9,6 +9,7 @@ import physicalGenerationChances from "../Dungeon Cartographer Settings/Physical
 import otherGenerationSettings from "../Dungeon Cartographer Settings/Other Generation Settings.md";
 import dungeonMonstersBase from "../Dungeon Cartographer Settings/Dungeon Monsters.base";
 import lockTrapStuckDoorDCs from "../Dungeon Cartographer Settings/Lock, Trap & Stuck Door DCs.md";
+import sampleTraps from "../Dungeon Cartographer Settings/Sample Traps.md";
 
 /** File name (as it should land in the vault's settings folder) -> contents. */
 export const SETTINGS_DEFAULT_FILES: Record<string, string> = {
@@ -16,4 +17,5 @@ export const SETTINGS_DEFAULT_FILES: Record<string, string> = {
   "Other Generation Settings.md": otherGenerationSettings,
   "Dungeon Monsters.base": dungeonMonstersBase,
   "Lock, Trap & Stuck Door DCs.md": lockTrapStuckDoorDCs,
+  "Sample Traps.md": sampleTraps,
 };

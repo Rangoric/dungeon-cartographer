@@ -39,7 +39,7 @@
 //   - a room/corridor/stair-height labeling policy resolved 2026-09-05,
 //   also in "2D Rendering Plan.md".
 
-import type { DungeonBox, DungeonDoor, DungeonFloorData, DungeonStair } from "./dungeonData";
+import type { DungeonBox, DungeonCorridor, DungeonDoor, DungeonFloorData, DungeonRoom, DungeonStair } from "./dungeonData";
 import { doorGapCell, doorGapCells } from "./dungeonData";
 
 /** 1 grid cube = 5' - see Dungeon Data Format.md's header comment. */
@@ -84,17 +84,42 @@ export function roomColorKind(kind: string): FloorColorKind {
   return "special";
 }
 
-/** Door leaf fill/stroke by material - the same three materials `generate.ts`'s default `doorMaterials` rolls from. An unrecognized material falls back to a neutral grey, same spirit as `renderFloor.ts`'s `doorColor()` fallback. */
+/**
+ * Door leaf fill/stroke by material - the five materials `generate.ts`'s
+ * default `doorMaterials` rolls from (Door Notes and Map Hover Plan.md
+ * Part C added archway/portcullis 2026-09-25). An unrecognized material
+ * falls back to a neutral grey, same spirit as `renderFloor.ts`'s
+ * `doorColor()` fallback.
+ *
+ * **Archway** has no real leaf (Part C1) - its fill matches
+ * `FLOOR_COLORS.room` so the opening reads as continuous open floor
+ * rather than a colored door; `floor2dView.ts`'s `drawDoorIcon` still
+ * draws the rect (covering the wall-block-colored door-gap cell beneath
+ * it - see `floorTo2DSpecs`), just with this near-invisible styling, so
+ * hover/trapped/secret marks still have something to attach to.
+ *
+ * **Portcullis** gets its own distinct fill (not `metal`'s grey, which
+ * would read as a plain metal door at map scale) - `drawDoorIcon` also
+ * draws a few lattice/hatch bars on top of the leaf so it doesn't get
+ * mistaken for a solid door of any kind.
+ */
 export const DOOR_FILL_COLORS: Record<string, string> = {
   wood: "#c9a876",
   metal: "#7f8e99",
   stone: "#d8d3c8",
+  archway: FLOOR_COLORS.room,
+  portcullis: "#5f6b74",
 };
 export const DOOR_STROKE_COLORS: Record<string, string> = {
   wood: "#6b4a24",
   metal: "#333d43",
   stone: "#6b6558",
+  archway: "#cccccc",
+  portcullis: "#2e363c",
 };
+
+/** The lattice/hatch bar color drawn across a portcullis leaf - see `DOOR_FILL_COLORS`'s doc comment. Exported so `floor2dView.ts` and the legend swatch in `main.ts` use the same color rather than two independent guesses. */
+export const PORTCULLIS_BAR_COLOR = "#c9d3da";
 const DEFAULT_DOOR_FILL = "#cccccc";
 const DEFAULT_DOOR_STROKE = "#333333";
 
@@ -257,6 +282,59 @@ function doorIcon(door: DungeonDoor): DoorIcon2D {
     trapped: door.trapped,
     stuck: door.stuck,
   };
+}
+
+/** Human-readable material name for tooltips/labels - title-cased fallback for anything not yet in the map (e.g. archway/portcullis, planned but not yet rolled by generate.ts - see "Door Notes and Map Hover Plan.md" Part C). */
+const MATERIAL_LABELS: Record<string, string> = {
+  wood: "Wood",
+  metal: "Metal",
+  stone: "Stone",
+  archway: "Archway",
+  portcullis: "Portcullis",
+};
+
+export function doorMaterialLabel(material: string): string {
+  return MATERIAL_LABELS[material] ?? material.charAt(0).toUpperCase() + material.slice(1);
+}
+
+/**
+ * Stage-1 (physical-only) map-hover tooltip text for a door - see "Door
+ * Notes and Map Hover Plan.md" Part B1/B2. Reads straight off the door's
+ * already-computed 2D icon data (material/secret/locked/trapped/stuck);
+ * no note lookup, no async work - that's stage 2, not built yet. Kept
+ * here (not in floor2dView.ts) so it stays unit-testable without a DOM,
+ * same reasoning as the rest of this module.
+ */
+export function doorTooltipLabel(door: DoorIcon2D): string {
+  const flags: string[] = [];
+  if (door.secret) flags.push("Secret");
+  if (door.locked) flags.push("Locked");
+  if (door.trapped) flags.push("Trapped");
+  if (door.stuck) flags.push("Stuck");
+  const material = doorMaterialLabel(door.material);
+  return flags.length > 0 ? `${material} door — ${flags.join(", ")}` : `${material} door`;
+}
+
+function titleCase(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+/**
+ * Stage-1 (physical-only) map-hover tooltip text for a room - see "Door
+ * Notes and Map Hover Plan.md" Part B1. `kind` is whatever generate.ts
+ * assigned ("room", "entrance", or a per-dungeon special like "boss") -
+ * title-cased as-is rather than mapped through a fixed label table, so an
+ * unanticipated special kind still reads sensibly instead of falling back
+ * to something generic.
+ */
+export function roomTooltipLabel(room: DungeonRoom): string {
+  const kindLabel = room.kind === "room" ? "Room" : titleCase(room.kind);
+  return `${kindLabel} ${room.id} — ${cubesToFeet(room.h)}' ceiling`;
+}
+
+/** Stage-1 map-hover tooltip text for a corridor. `width` is in the same door-width units as `DungeonDoor.width` (1 = 5', 2 = 10') - see Dungeon Data Format.md. */
+export function corridorTooltipLabel(corridor: DungeonCorridor): string {
+  return `Corridor ${corridor.id} — ${cubesToFeet(corridor.width)}' wide`;
 }
 
 export interface StairIcon2D {

@@ -4,9 +4,13 @@ import {
   roomColorKind,
   doorFillColor,
   doorStrokeColor,
+  doorMaterialLabel,
+  FLOOR_COLORS,
+  doorTooltipLabel,
+  roomTooltipLabel,
+  corridorTooltipLabel,
   floorTo2DSpecs,
   WALL_COLOR,
-  FLOOR_COLORS,
   MIN_CORRIDOR_LABEL_AREA,
 } from "../src/floor2d";
 import type { DungeonDoor, DungeonFloorData, DungeonRoom, DungeonCorridor, DungeonRegion, DungeonStair } from "../src/dungeonData";
@@ -74,6 +78,15 @@ describe("doorFillColor / doorStrokeColor", () => {
   it("falls back to a default color for an unrecognized material", () => {
     expect(() => doorFillColor("mystery-material")).not.toThrow();
     expect(() => doorStrokeColor("mystery-material")).not.toThrow();
+  });
+
+  it("gives archway a fill matching the plain room floor color (no real leaf - Door Notes and Map Hover Plan.md Part C6)", () => {
+    expect(doorFillColor("archway")).toBe(FLOOR_COLORS.room);
+  });
+
+  it("gives portcullis its own distinct fill/stroke, not metal's", () => {
+    expect(doorFillColor("portcullis")).not.toBe(doorFillColor("metal"));
+    expect(doorStrokeColor("portcullis")).not.toBe(doorStrokeColor("metal"));
   });
 });
 
@@ -250,5 +263,66 @@ describe("floorTo2DSpecs - corridorHeightLabels (ceiling-height policy, 2D Rende
     expect(corridorHeightLabels).toHaveLength(2);
     expect(corridorHeightLabels.find((l) => l.cx === 0.5)).toMatchObject({ heightFt: 10, rotated: true });
     expect(corridorHeightLabels.find((l) => l.cx === 6.5)).toMatchObject({ heightFt: 10, rotated: false });
+  });
+});
+
+describe("doorTooltipLabel", () => {
+  const baseIcon = {
+    id: 0,
+    span: { x0: 0, y0: 0, x1: 1, y1: 1 },
+    crossesX: true,
+    material: "wood",
+    secret: false,
+    locked: false,
+    trapped: false,
+    stuck: false,
+  };
+
+  it("shows just the material for a plain door", () => {
+    expect(doorTooltipLabel(baseIcon)).toBe("Wood door");
+  });
+
+  it("lists every true flag, in secret/locked/trapped/stuck order", () => {
+    expect(doorTooltipLabel({ ...baseIcon, material: "metal", locked: true, trapped: true, stuck: true, secret: true })).toBe(
+      "Metal door \u2014 Secret, Locked, Trapped, Stuck"
+    );
+  });
+
+  it("lists only the flags that are actually true", () => {
+    expect(doorTooltipLabel({ ...baseIcon, trapped: true })).toBe("Wood door \u2014 Trapped");
+  });
+
+  it("title-cases an unrecognized material rather than throwing", () => {
+    expect(doorMaterialLabel("mystery-material")).toBe("Mystery-material");
+    expect(doorTooltipLabel({ ...baseIcon, material: "mystery-material" })).toBe("Mystery-material door");
+  });
+});
+
+describe("roomTooltipLabel", () => {
+  it("labels a plain room with its id and ceiling height", () => {
+    const room: DungeonRoom = { id: 3, kind: "room", x: 0, y: 0, z: 0, w: 4, d: 4, h: 2 };
+    expect(roomTooltipLabel(room)).toBe("Room 3 \u2014 10' ceiling");
+  });
+
+  it("uses the entrance label", () => {
+    const room: DungeonRoom = { id: 0, kind: "entrance", x: 0, y: 0, z: 0, w: 2, d: 2, h: 2 };
+    expect(roomTooltipLabel(room)).toBe("Entrance 0 \u2014 10' ceiling");
+  });
+
+  it("title-cases an arbitrary special kind", () => {
+    const room: DungeonRoom = { id: 5, kind: "boss", x: 0, y: 0, z: 0, w: 6, d: 6, h: 6 };
+    expect(roomTooltipLabel(room)).toBe("Boss 5 \u2014 30' ceiling");
+  });
+});
+
+describe("corridorTooltipLabel", () => {
+  it("labels a 5'-wide corridor", () => {
+    const corridor: DungeonCorridor = { id: 1, connects: [{ kind: "room", id: 0 }, { kind: "room", id: 1 }], width: 1, segments: [] };
+    expect(corridorTooltipLabel(corridor)).toBe("Corridor 1 \u2014 5' wide");
+  });
+
+  it("labels a 10'-wide corridor", () => {
+    const corridor: DungeonCorridor = { id: 2, connects: [{ kind: "room", id: 0 }, { kind: "room", id: 1 }], width: 2, segments: [] };
+    expect(corridorTooltipLabel(corridor)).toBe("Corridor 2 \u2014 10' wide");
   });
 });

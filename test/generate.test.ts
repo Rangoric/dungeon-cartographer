@@ -423,7 +423,16 @@ describe("generateFloor - door spacing (2026-09-14)", () => {
     // is ever produced (see `pickDoorWidth` - 3 is never a normal roll) -
     // so a merge that got the span math wrong wouldn't just look wrong,
     // it'd actually cover real floor.
-    const data = generateFloor(testConfig({ seed: 96 }));
+    //
+    // `doorMaterials` excludes archway here (Door Notes and Map Hover
+    // Plan.md Part C) - an archway door skips its locked/stuck rolls
+    // entirely (no wasted RNG call - see `rollDoorMaterialAndFlags`),
+    // which shifts the RNG sequence for every door after it on a given
+    // seed. This test is about merge geometry, not the material system,
+    // so it pins materials to the pre-Part-C three-material set (still
+    // one `rng.random()` call per door either way) to keep seed 96
+    // reproducing the exact scenario it was written against.
+    const data = generateFloor(testConfig({ seed: 96, doorMaterials: ["wood", "metal", "stone"] }));
     const door = data.doors.find((d) => d.width >= 3);
     expect(door).toBeDefined();
     const interiors = allSegments(data);
@@ -455,14 +464,80 @@ describe("generateFloor - door quality rolls (locked/trapped/stuck, 2026-09-05)"
   });
 
   it("rolls every door locked, trapped, AND stuck at once when all three chances are 1 - independent, not mutually exclusive", () => {
+    // `doorMaterials` excludes archway - archway doors force locked/stuck
+    // off regardless of chance (Door Notes and Map Hover Plan.md Part
+    // C1/C3), which is real and correct but not what this test is
+    // checking (that the three rolls are independent of EACH OTHER, not
+    // gated by material).
     const data = generateFloor(
-      testConfig({ gridWidth: 24, gridDepth: 24, seed: 9, lockedDoorChance: 1, trappedDoorChance: 1, stuckDoorChance: 1 })
+      testConfig({
+        gridWidth: 24,
+        gridDepth: 24,
+        seed: 9,
+        lockedDoorChance: 1,
+        trappedDoorChance: 1,
+        stuckDoorChance: 1,
+        doorMaterials: ["wood", "metal", "stone", "portcullis"],
+      })
     );
     expect(data.doors.length).toBeGreaterThan(0);
     for (const door of data.doors) {
       expect(door.locked).toBe(true);
       expect(door.trapped).toBe(true);
       expect(door.stuck).toBe(true);
+    }
+  });
+
+  it("forces locked/stuck off for archway doors even when their chances are 1, but still rolls trapped normally (Door Notes and Map Hover Plan.md Part C1/C3)", () => {
+    const data = generateFloor(
+      testConfig({
+        gridWidth: 24,
+        gridDepth: 24,
+        seed: 9,
+        doorMaterials: ["archway"],
+        lockedDoorChance: 1,
+        trappedDoorChance: 1,
+        stuckDoorChance: 1,
+      })
+    );
+    expect(data.doors.length).toBeGreaterThan(0);
+    for (const door of data.doors) {
+      expect(door.material).toBe("archway");
+      expect(door.locked).toBe(false);
+      expect(door.stuck).toBe(false);
+      expect(door.trapped).toBe(true);
+    }
+  });
+
+  it("never leaves an archway door locked or stuck across a wide seed sweep at default config - regression guard for the merge/harmonize material-copy path (Part C5)", () => {
+    // Unlike the two tests above (which pin doorMaterials to isolate one
+    // behavior), this sweeps the REAL default config/weights, so it also
+    // exercises mergeAdjacentDoors/harmonizeCloseDoors: if either copied a
+    // winning door's material without also copying its locked/stuck flags
+    // (or vice versa), a merged/harmonized door could end up labeled
+    // "archway" while still carrying a `true` from whichever door lost the
+    // solidity comparison - this catches that class of bug directly,
+    // rather than only checking geometry/connectivity like the sweeps
+    // above it.
+    for (let seed = 0; seed < 30; seed++) {
+      const data = generateFloor(testConfig({ gridWidth: 30, gridDepth: 30, seed }));
+      for (const door of data.doors) {
+        if (door.material !== "archway") continue;
+        expect(door.locked).toBe(false);
+        expect(door.stuck).toBe(false);
+      }
+    }
+  });
+
+  it("rolls a mix of all five materials under the default weights, archway/portcullis included (Part C4)", () => {
+    const allDoors = [];
+    for (let seed = 0; seed < 15; seed++) {
+      const data = generateFloor(testConfig({ gridWidth: 36, gridDepth: 36, seed }));
+      allDoors.push(...data.doors);
+    }
+    expect(allDoors.length).toBeGreaterThan(50);
+    for (const material of ["wood", "metal", "stone", "archway", "portcullis"]) {
+      expect(allDoors.some((d) => d.material === material)).toBe(true);
     }
   });
 

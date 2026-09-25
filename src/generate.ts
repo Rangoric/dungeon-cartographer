@@ -144,7 +144,14 @@ export interface GenerateConfig {
   deadEndPruneFraction: number;
 
   specialKinds: string[]; // optional per-dungeon special rooms, e.g. ["boss"]
+  // Door material roll - Door Notes and Map Hover Plan.md Part C. `doorMaterials`
+  // is the eligible set; `doorMaterialWeights` (same index order, optional -
+  // an omitted/mismatched-length array falls back to uniform weights, same
+  // leniency as the rest of this config) lets archway/portcullis stay
+  // uncommon relative to wood/metal/stone rather than an even split. Picked
+  // via `rng.choices`, not `rng.choice` - see `rollDoorMaterial`.
   doorMaterials: string[];
+  doorMaterialWeights?: number[];
   secretDoorChance: number;
   // Door-quality rolls added 2026-09-05 (see Physical vs Content Split.md's
   // amendment and 2D Rendering Plan.md) - three independent per-door rolls,
@@ -182,7 +189,12 @@ export const DEFAULT_GENERATE_CONFIG: Omit<GenerateConfig, "gridWidth" | "gridDe
   spurLengthRange: [2, 9],
   deadEndPruneFraction: 0.5,
   specialKinds: [],
-  doorMaterials: ["wood", "metal", "stone"],
+  // wood/metal/stone split the common ~85%, archway+portcullis share the
+  // remaining ~15% - Door Notes and Map Hover Plan.md Part C4 ("uncommon,
+  // roughly 15% combined"). A starting point, not tuned against real
+  // floors, same status as every other roll weight in this file.
+  doorMaterials: ["wood", "metal", "stone", "archway", "portcullis"],
+  doorMaterialWeights: [28, 28, 29, 7, 8],
   secretDoorChance: 0.05,
   // 1-in-3, 1-in-3, 1-in-6 - set 2026-09-05, independent rolls.
   lockedDoorChance: 1 / 3,
@@ -203,6 +215,75 @@ export function configFromFloorSetup(setup: FloorSetup, overrides: Partial<Gener
     gridDepth: setup.gridDepth,
     ...overrides,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Door material + flags - Door Notes and Map Hover Plan.md Part C
+// ---------------------------------------------------------------------------
+
+/** Weighted door-material pick - `config.doorMaterialWeights` by index, falling back to uniform weights if it's missing or a different length than `doorMaterials` (a malformed/hand-edited config shouldn't crash generation, same leniency as the settings-file parsers elsewhere in this plugin). */
+function rollDoorMaterial(rng: Rng, config: GenerateConfig): string {
+  const weights =
+    config.doorMaterialWeights && config.doorMaterialWeights.length === config.doorMaterials.length
+      ? config.doorMaterialWeights
+      : config.doorMaterials.map(() => 1);
+  return rng.choices(config.doorMaterials, weights);
+}
+
+interface RolledDoorMaterialAndFlags {
+  material: string;
+  secret: boolean;
+  locked: boolean;
+  trapped: boolean;
+  stuck: boolean;
+}
+
+/**
+ * Rolls a door's material plus its four independent flags in one place, so
+ * the several door-creation call sites below stay in sync. Archway
+ * eligibility (Part C1/C3): an archway has no leaf, so `locked`/`stuck`
+ * are forced `false` WITHOUT consuming an `rng.random()` call for them -
+ * skip the roll entirely rather than roll-and-discard, so the RNG draw
+ * sequence for every subsequent door on the same seed doesn't shift
+ * depending on whether an earlier door happened to land on archway.
+ * `trapped` rolls normally for every material, archway included (a
+ * pressure plate/tripwire needs no leaf). Every other material (wood/
+ * metal/stone/portcullis) rolls all three flags unrestricted, same as
+ * before Part C existed.
+ */
+function rollDoorMaterialAndFlags(rng: Rng, config: GenerateConfig): RolledDoorMaterialAndFlags {
+  const material = rollDoorMaterial(rng, config);
+  const secret = rng.random() < config.secretDoorChance;
+  const isArchway = material === "archway";
+  const locked = isArchway ? false : rng.random() < config.lockedDoorChance;
+  const trapped = rng.random() < config.trappedDoorChance;
+  const stuck = isArchway ? false : rng.random() < config.stuckDoorChance;
+  return { material, secret, locked, trapped, stuck };
+}
+
+/** Weakest to strongest, per Part C5 - a placeholder ranking, same "starting point, not tuned" status as the roll weights above. Governs which material wins when `mergeAdjacentDoors`/`harmonizeCloseDoors` reconcile two independently-rolled neighboring doors of different materials. */
+const DOOR_MATERIAL_SOLIDITY: Record<string, number> = {
+  archway: 0,
+  wood: 1,
+  portcullis: 2,
+  metal: 3,
+  stone: 4,
+};
+
+/** An unrecognized material (shouldn't happen with a config built from `DEFAULT_GENERATE_CONFIG`, but a hand-edited `doorMaterials` list could add one) ranks alongside wood rather than crashing the comparison. */
+function doorMaterialSolidity(material: string): number {
+  return DOOR_MATERIAL_SOLIDITY[material] ?? DOOR_MATERIAL_SOLIDITY.wood;
+}
+
+/**
+ * The more solid of two doors' materials, per `DOOR_MATERIAL_SOLIDITY`. A
+ * tie (same material, or two unrecognized ones) favors `a` - callers pass
+ * the door that should win on a tie (the survivor in a merge, the earlier
+ * door in a harmonized run), matching this function's pre-Part-C behavior
+ * of just keeping that door's own roll outright.
+ */
+function moreSolidDoor(a: GenDoor, b: GenDoor): GenDoor {
+  return doorMaterialSolidity(b.material) > doorMaterialSolidity(a.material) ? b : a;
 }
 
 // ---------------------------------------------------------------------------
@@ -1262,11 +1343,26 @@ function mergeAdjacentDoors(graph: Graph): void {
  * `mergeAdjacentDoors`'s sorted groups): widens `a` to cover both spans,
  * repoints `b`'s corridor to meet `a`'s corridor at a junction instead of
  * this room via a door, and removes `b`.
+ *
+ * **Part C5:** mismatched materials are allowed to merge - the more solid
+ * one wins (`moreSolidDoor`) and its material/secret/locked/trapped/stuck
+ * overwrite `a`'s own roll (ties keep `a`'s, same as before Part C
+ * existed). Nothing needs re-rolling: the winner's own flags already
+ * respect its own material's eligibility from `rollDoorMaterialAndFlags`
+ * (e.g. an archway merged with a wood door becomes a wood door - it gains
+ * a leaf, and is then eligible for locked/stuck like any wood door).
  */
 function mergeTwoDoors(graph: Graph, room: GenRoom, a: GenDoor, b: GenDoor): void {
   const spanA = doorWallSpanOnRoom(a, room)!;
   const spanB = doorWallSpanOnRoom(b, room)!;
   a.width = Math.max(spanA.hi, spanB.hi) - Math.min(spanA.lo, spanB.lo) + 1;
+
+  const winner = moreSolidDoor(a, b);
+  a.material = winner.material;
+  a.secret = winner.secret;
+  a.locked = winner.locked;
+  a.trapped = winner.trapped;
+  a.stuck = winner.stuck;
 
   const aCorridorEnd = a.connects.find((end) => end.kind === "corridor") as { kind: "corridor"; id: number };
   const bCorridorEnd = b.connects.find((end) => end.kind === "corridor") as { kind: "corridor"; id: number };
@@ -1285,8 +1381,9 @@ function mergeTwoDoors(graph: Graph, room: GenRoom, a: GenDoor, b: GenDoor): voi
  * cell apart on the same room wall (not merged - see that function's doc
  * comment on why) still shouldn't read as doors that just happened to
  * collide. Forces every door in a close-together RUN to share one roll
- * (material/secret/locked/trapped/stuck - the lowest-id door's), without
- * touching geometry.
+ * (material/secret/locked/trapped/stuck - the most solid door's in the
+ * run, `moreSolidDoor`, ties favor the earlier door in wall order - see
+ * Part C5), without touching geometry.
  *
  * Syncing pairwise instead (each door to just its immediate neighbor)
  * looks right but isn't: for a run of 3+ (A-B gap 1, B-C gap 1), syncing
@@ -1305,7 +1402,7 @@ function harmonizeCloseDoors(graph: Graph): void {
         if (connected) continue;
         if (i - 1 > runStart) {
           const cluster = list.slice(runStart, i).map((x) => x.door);
-          const keep = cluster.reduce((best, d) => (d.id < best.id ? d : best));
+          const keep = cluster.reduce((best, d) => moreSolidDoor(best, d));
           for (const d of cluster) {
             if (d.id === keep.id) continue;
             d.material = keep.material;
@@ -1381,11 +1478,7 @@ function growConnectingBranch(
       connects: [{ kind: "room", id: sourceRoom.id }, { kind: "corridor", id: targetCorridor.id }],
       cellA: doorPick.cellA,
       cellB: doorPick.cellB,
-      material: rng.choice(config.doorMaterials),
-      secret: rng.random() < config.secretDoorChance,
-      locked: rng.random() < config.lockedDoorChance,
-      trapped: rng.random() < config.trappedDoorChance,
-      stuck: rng.random() < config.stuckDoorChance,
+      ...rollDoorMaterialAndFlags(rng, config),
       width: doorPick.width,
     };
     graph.doors.push(door);
@@ -1543,11 +1636,7 @@ function commitRoute(
     connects: [{ kind: "room", id: sourceRoom.id }, { kind: "corridor", id: corridor.id }],
     cellA: startDoorPick.cellA,
     cellB: startDoorPick.cellB,
-    material: rng.choice(config.doorMaterials),
-    secret: rng.random() < config.secretDoorChance,
-    locked: rng.random() < config.lockedDoorChance,
-    trapped: rng.random() < config.trappedDoorChance,
-    stuck: rng.random() < config.stuckDoorChance,
+    ...rollDoorMaterialAndFlags(rng, config),
     width: startDoorPick.width,
   };
   graph.doors.push(startDoor);
@@ -1560,11 +1649,7 @@ function commitRoute(
       connects: [{ kind: "corridor", id: corridor.id }, { kind: "room", id: endRoom.id }],
       cellA: endDoorPick.cellB, // corridor-side cell first, mirroring the start door's own room->corridor order flipped
       cellB: endDoorPick.cellA,
-      material: rng.choice(config.doorMaterials),
-      secret: rng.random() < config.secretDoorChance,
-      locked: rng.random() < config.lockedDoorChance,
-      trapped: rng.random() < config.trappedDoorChance,
-      stuck: rng.random() < config.stuckDoorChance,
+      ...rollDoorMaterialAndFlags(rng, config),
       width: endDoorPick.width,
     };
     graph.doors.push(endDoor);
@@ -1809,11 +1894,7 @@ function growSpur(
       connects: [{ kind: "room", id: sourceRoom.id }, { kind: "corridor", id: corridor.id }],
       cellA: doorPick.cellA,
       cellB: doorPick.cellB,
-      material: rng.choice(config.doorMaterials),
-      secret: rng.random() < config.secretDoorChance,
-      locked: rng.random() < config.lockedDoorChance,
-      trapped: rng.random() < config.trappedDoorChance,
-      stuck: rng.random() < config.stuckDoorChance,
+      ...rollDoorMaterialAndFlags(rng, config),
       width: doorPick.width,
     };
     graph.doors.push(door);
@@ -1966,11 +2047,7 @@ function addStairs(graph: Graph, grid: GridSize, config: GenerateConfig, rng: Rn
       connects: [{ kind: "room", id: base.id }, { kind: "room", id: base.id }],
       cellA: doorPick.cellA,
       cellB: doorPick.cellB,
-      material: rng.choice(config.doorMaterials),
-      secret: rng.random() < config.secretDoorChance,
-      locked: rng.random() < config.lockedDoorChance,
-      trapped: rng.random() < config.trappedDoorChance,
-      stuck: rng.random() < config.stuckDoorChance,
+      ...rollDoorMaterialAndFlags(rng, config),
       width: 1,
     };
     graph.doors.push(door);
