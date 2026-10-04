@@ -10,12 +10,17 @@ import otherGenerationSettings from "../Dungeon Cartographer Settings/Other Gene
 import dungeonMonstersBase from "../Dungeon Cartographer Settings/Dungeon Monsters.base";
 import lockTrapStuckDoorDCs from "../Dungeon Cartographer Settings/Lock, Trap & Stuck Door DCs.md";
 import sampleTraps from "../Dungeon Cartographer Settings/Sample Traps.md";
+import { TREASURE_DEFAULT_FILES, TREASURE_FOLDER_NAME } from "./treasureDefaults";
 
-/** File name (as it should land in the vault's settings folder) -> contents. */
+/** File path relative to the vault's settings folder -> contents. */
 export const SETTINGS_DEFAULT_FILES: Record<string, string> = {
   "Physical Generation Chances.md": physicalGenerationChances,
   "Other Generation Settings.md": otherGenerationSettings,
   "Dungeon Monsters.base": dungeonMonstersBase,
   "Lock, Trap & Stuck Door DCs.md": lockTrapStuckDoorDCs,
   "Sample Traps.md": sampleTraps,
+  // Treasure tables go in their own subfolder (settingsSync creates it).
+  ...Object.fromEntries(
+    Object.entries(TREASURE_DEFAULT_FILES).map(([name, text]) => [`${TREASURE_FOLDER_NAME}/${name}`, text])
+  ),
 };

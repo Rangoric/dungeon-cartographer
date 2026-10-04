@@ -15,6 +15,28 @@ import {
   rollDoorChallengeLevel,
 } from "./doorNotes";
 import { buildCorridorStubMarkdown, corridorNotePathFor, noteHoverExcerpt } from "./entityNotes";
+import {
+  buildEncounterNoteMarkdown,
+  generateEncounters,
+  MAX_FACTIONS,
+  parseCR,
+  parseEncounterSetup,
+  parseFactionFile,
+  parseTrapsByCR,
+  type Faction,
+  type PoolMonster,
+} from "./encounters";
+
+import { buildTreasureMarkdown, readTreasureSettings, rollFloorTreasure } from "./treasure";
+import { parseTreasureFile, type TreasureTables } from "./treasureTables";
+import { TREASURE_DEFAULT_FILES, TREASURE_FOLDER_NAME } from "./treasureDefaults";
+
+/** Where the vault's monster stat-block notes live - the random-pick pool for encounter generation. */
+const MONSTER_FOLDER = "Source Data/Monsters";
+/** Faction files: `Dungeon Cartographer Settings/Factions/<Name>.md`, name-matched to the Setup file's Factions row. */
+const FACTIONS_FOLDER = `${SETTINGS_FOLDER_NAME}/Factions`;
+/** Same filter as `Dungeon Monsters.base`: a monster belongs in dungeons if its terrain_hex includes Underground or Any. */
+const DUNGEON_TERRAINS = ["underground", "any"];
 
 // 2026-09-05: the 3D Three.js viewer (OrbitControls, WebGLRenderer, the
 // whole scene-graph approach) is retired in favor of a flat top-down SVG
@@ -127,6 +149,11 @@ class DungeonView extends ItemView {
 
   getViewType(): string {
     return VIEW_TYPE;
+  }
+
+  /** The `.dungeon` file this pane is showing, if any. */
+  floorFile(): TFile | null {
+    return this.file;
   }
 
   getDisplayText(): string {
@@ -671,7 +698,166 @@ export default class DungeonCartographerPlugin extends Plugin {
       callback: () => this.resetSettingsToDefaults(),
     });
 
+    this.addCommand({
+      id: "generate-encounters-and-traps",
+      name: "Generate Encounters & Traps (for the open floor or Setup file)",
+      checkCallback: (checking: boolean) => {
+        const setupPath = this.activeSetupPath();
+        if (!setupPath) return false;
+        if (!checking) void this.generateEncountersAndTraps(setupPath);
+        return true;
+      },
+    });
+
     this.addRibbonIcon("map", "Open Dungeon Cartographer", () => this.activateView());
+  }
+
+  // --- Encounters & traps (Dungeon Setup.md) -------------------------------
+  //
+  // Works off whichever floor is active: a `Floor N Setup.md` note, a
+  // `Floor N.dungeon` file, or an open Dungeon Cartographer view. Writes
+  // `Floor N Encounters.md` next to the Setup file, overwriting any earlier
+  // run - see encounters.ts for the rules and the defaults chosen for the
+  // design's open questions.
+
+  /** The Setup file path for the active floor, or null when nothing floor-like is active. */
+  private activeSetupPath(): string | null {
+    const view = this.app.workspace.getActiveViewOfType(DungeonView);
+    const file = view?.floorFile() ?? this.app.workspace.getActiveFile();
+    if (!file) return null;
+    const folder = file.parent && file.parent.path && file.parent.path !== "/" ? `${file.parent.path}/` : "";
+    if (file.extension === FLOOR_EXTENSION) return `${folder}${file.basename} Setup.md`;
+    if (file.extension === "md" && / Setup$/.test(file.basename)) return file.path;
+    return null;
+  }
+
+  private async readVaultText(path: string): Promise<string | null> {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return null;
+    try {
+      return await this.app.vault.read(file);
+    } catch (e) {
+      console.warn(`[DungeonCartographer] Could not read ${path}:`, e);
+      return null;
+    }
+  }
+
+  /** name -> CR for every monster note, and the dungeon-suitable subset used for random picks. */
+  private loadMonsters(): { crByName: Map<string, number | null>; pool: PoolMonster[] } {
+    const crByName = new Map<string, number | null>();
+    const pool: PoolMonster[] = [];
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      if (!file.path.startsWith(`${MONSTER_FOLDER}/`)) continue;
+      const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+      if (!fm) continue;
+      const cr = parseCR(fm["Challenge_Rating"]);
+      crByName.set(file.basename, cr);
+      if (cr === null) continue;
+      const terrain = fm["terrain_hex"];
+      const terrains = (Array.isArray(terrain) ? terrain : [terrain]).map((t) => String(t ?? "").toLowerCase().trim());
+      if (terrains.some((t) => DUNGEON_TERRAINS.includes(t))) pool.push({ name: file.basename, cr });
+    }
+    return { crByName, pool };
+  }
+
+  /**
+   * The treasure tables: every `Dungeon Cartographer Settings/Treasure/*.md`
+   * in the vault, with the plugin's bundled copy standing in for any file
+   * the vault doesn't have (so treasure works before "Reset Settings to
+   * Defaults" has ever been run).
+   */
+  private async loadTreasureTables(): Promise<TreasureTables> {
+    const tables: TreasureTables = new Map();
+    for (const [fileName, bundled] of Object.entries(TREASURE_DEFAULT_FILES)) {
+      const text = await this.readVaultText(`${SETTINGS_FOLDER_NAME}/${TREASURE_FOLDER_NAME}/${fileName}`);
+      parseTreasureFile(fileName.replace(/\.md$/, ""), text ?? bundled, tables);
+    }
+    return tables;
+  }
+
+  private async generateEncountersAndTraps(setupPath: string): Promise<void> {
+    try {
+      const setupText = await this.readVaultText(setupPath);
+      if (setupText === null) {
+        new Notice(`No Setup file at "${setupPath}" - create it first (Grid Size, Level, Factions).`);
+        return;
+      }
+      const floorSetup = parseFloorSetup(setupText);
+      const encounterSetup = parseEncounterSetup(setupText);
+      const extraFlags: string[] = [];
+
+      let factionNames = encounterSetup.factions;
+      if (factionNames.length > MAX_FACTIONS) {
+        extraFlags.push(`More than ${MAX_FACTIONS} factions listed - only the first ${MAX_FACTIONS} were used.`);
+        factionNames = factionNames.slice(0, MAX_FACTIONS);
+      }
+      const factions: Faction[] = [];
+      for (const name of factionNames) {
+        const text = await this.readVaultText(`${FACTIONS_FOLDER}/${name}.md`);
+        if (text === null) {
+          extraFlags.push(`No faction file "${FACTIONS_FOLDER}/${name}.md" - its slot went to a random monster.`);
+          continue;
+        }
+        const faction = parseFactionFile(name, text);
+        if (faction.encounters.length === 0) {
+          extraFlags.push(`"${name}" has no Encounters table rows - its slot went to a random monster.`);
+          continue;
+        }
+        factions.push(faction);
+      }
+
+      const { crByName, pool } = this.loadMonsters();
+      if (pool.length === 0) extraFlags.push(`No monsters found under "${MONSTER_FOLDER}" - every random slot is a placeholder.`);
+      const preselected = encounterSetup.preselected.map((name) => ({ name, cr: crByName.get(name) ?? null }));
+      const traps = parseTrapsByCR((await this.readVaultText(`${SETTINGS_FOLDER_NAME}/Sample Traps.md`)) ?? "");
+
+      const seed = encounterSetup.seed ?? Date.now() % 1_000_000_000;
+      const rng = new Rng(seed);
+      const result = generateEncounters({
+        level: floorSetup.level,
+        factions,
+        preselected,
+        pool,
+        traps,
+        rng,
+      });
+      result.flags.unshift(...extraFlags);
+
+      // One treasure per encounter (traps included), at the encounter's own EL.
+      const treasureTables = await this.loadTreasureTables();
+      const treasure = rollFloorTreasure(treasureTables, result.encounters.map((e) => e.el), rng);
+      result.flags.push(...treasure.flags);
+      const treasureSection = buildTreasureMarkdown(
+        treasure,
+        result.encounters.map((e) => e.id),
+        readTreasureSettings(treasureTables)
+      );
+
+      const floorBasename = setupPath.replace(/^.*\//, "").replace(/ Setup\.md$/, "");
+      const folder = setupPath.includes("/") ? setupPath.slice(0, setupPath.lastIndexOf("/") + 1) : "";
+      const outPath = `${folder}${floorBasename} Encounters.md`;
+      const markdown = buildEncounterNoteMarkdown({
+        floorBasename,
+        level: floorSetup.level,
+        factionNames: factions.map((f) => f.name),
+        seed,
+        generatedOn: new Date().toISOString().slice(0, 10),
+        result,
+        extraSections: treasureSection,
+      });
+
+      const existing = this.app.vault.getAbstractFileByPath(outPath);
+      if (existing instanceof TFile) await this.app.vault.modify(existing, markdown);
+      else await this.app.vault.create(outPath, markdown);
+      await this.app.workspace.openLinkText(outPath, "", true);
+      new Notice(
+        `Generated encounters for "${floorBasename}"` +
+          (result.flags.length > 0 ? ` - ${result.flags.length} flag${result.flags.length === 1 ? "" : "s"} to review.` : ".")
+      );
+    } catch (e) {
+      console.error("[DungeonCartographer] Failed to generate encounters:", e);
+      new Notice("Failed to generate encounters - see console for details.");
+    }
   }
 
   async onunload(): Promise<void> {

@@ -35,6 +35,22 @@ describe("copySettingsDefaults", () => {
     expect(adapter._files.get(`${SETTINGS_FOLDER_NAME}/Other Generation Settings.md`)).toBe("other");
   });
 
+  it("creates a subfolder for a default that lives in one", async () => {
+    const adapter = fakeAdapter();
+    const made: string[] = [];
+    const originalMkdir = adapter.mkdir.bind(adapter);
+    adapter.mkdir = async (path) => {
+      made.push(path);
+      await originalMkdir(path);
+    };
+
+    const copied = await copySettingsDefaults(adapter, { "Treasure/Rings.md": "rings", "Treasure/Rods.md": "rods" });
+
+    expect(copied).toEqual(["Treasure/Rings.md", "Treasure/Rods.md"]);
+    expect(made).toEqual([SETTINGS_FOLDER_NAME, `${SETTINGS_FOLDER_NAME}/Treasure`]);
+    expect(adapter._files.get(`${SETTINGS_FOLDER_NAME}/Treasure/Rings.md`)).toBe("rings");
+  });
+
   it("overwrites an existing vault copy rather than skipping it", async () => {
     const adapter = fakeAdapter({
       [`${SETTINGS_FOLDER_NAME}/Physical Generation Chances.md`]: "hand-edited value",

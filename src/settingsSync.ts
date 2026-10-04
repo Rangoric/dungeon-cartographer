@@ -33,9 +33,10 @@ export interface SettingsAdapter {
 }
 
 /**
- * Writes every file in `defaults` (file name -> contents) into `Dungeon
- * Cartographer Settings/` at the vault root, creating that folder first
- * if it doesn't exist yet. Always overwrites. Returns the list of file
+ * Writes every file in `defaults` (path relative to the settings folder ->
+ * contents) into `Dungeon Cartographer Settings/` at the vault root,
+ * creating that folder (and any subfolder a path names) first if it
+ * doesn't exist yet. Always overwrites. Returns the list of file
  * names written, for the confirmation Notice.
  */
 export async function copySettingsDefaults(
@@ -48,6 +49,13 @@ export async function copySettingsDefaults(
 
   const copied: string[] = [];
   for (const [fileName, contents] of Object.entries(defaults)) {
+    // A default may live in a subfolder ("Treasure/Rings.md") - create it first.
+    const parts = fileName.split("/");
+    let folder = SETTINGS_FOLDER_NAME;
+    for (const part of parts.slice(0, -1)) {
+      folder = `${folder}/${part}`;
+      if (!(await adapter.exists(folder))) await adapter.mkdir(folder);
+    }
     await adapter.write(`${SETTINGS_FOLDER_NAME}/${fileName}`, contents);
     copied.push(fileName);
   }
