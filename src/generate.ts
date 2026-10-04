@@ -174,8 +174,12 @@ export interface GenerateConfig {
 /** Confirmed defaults - see Room Corridor Rework Plan.md and Simplification Plan.md. */
 export const DEFAULT_GENERATE_CONFIG: Omit<GenerateConfig, "gridWidth" | "gridDepth"> = {
   gridHeight: 6,
-  minRoomSize: [2, 2],
-  maxRoomSize: [6, 6],
+  // 3-7 squares a side (15'-35') since 2026-10-05, up from 2-6: over half
+  // the rooms on a 2-6 floor had a side only 2 squares wide and a third
+  // were 6 squares or smaller, and a floor averaged ~30 rooms against 9-11
+  // encounters. 3-7 averages ~21 rooms with a median of ~19 squares.
+  minRoomSize: [3, 3],
+  maxRoomSize: [7, 7],
   maxAttempts: 4000,
   shrinkAfter: 150,
   footprintTarget: 0.4,
@@ -196,9 +200,16 @@ export const DEFAULT_GENERATE_CONFIG: Omit<GenerateConfig, "gridWidth" | "gridDe
   doorMaterials: ["wood", "metal", "stone", "archway", "portcullis"],
   doorMaterialWeights: [28, 28, 29, 7, 8],
   secretDoorChance: 0.05,
-  // 1-in-3, 1-in-3, 1-in-6 - set 2026-09-05, independent rolls.
+  // Locked 1-in-3 and stuck 1-in-6 - set 2026-09-05, independent rolls.
+  // Trapped was 1-in-3 too until 2026-10-03: a floor's ~12 trapped doors
+  // put more than half its XP into traps, which only one character really
+  // interacts with. Doors no longer roll traps at all; the 2-3 traps the
+  // encounter generator rolls (encounters.ts) are the floor's traps, and
+  // get placed by hand - on a door, on treasure, or in a room. The field
+  // and its roll stay (so the RNG sequence per door doesn't shift, and a
+  // door can still be marked `trapped` by hand in the `.dungeon` file).
   lockedDoorChance: 1 / 3,
-  trappedDoorChance: 1 / 3,
+  trappedDoorChance: 0,
   stuckDoorChance: 1 / 6,
   stairCountRange: [1, 2],
   stairEmbeddedChance: 0.5,
@@ -657,7 +668,12 @@ function placeRooms(graph: Graph, grid: GridSize, config: GenerateConfig, rng: R
   const variance = (rng.random() * 2 - 1) * config.footprintTargetVariance;
   const targetFraction = config.footprintTarget * (1 + variance);
 
-  const entrance = randomBoundaryRoom(grid, 2, 2, 2, 0, rng);
+  // The entrance rolls its size and ceiling height like any other room
+  // (2026-10-05) - it used to be a fixed 2x2, the same awkward closet size
+  // the minimum-size bump removed everywhere else. Still boundary-pinned.
+  const entranceW = Math.min(grid.width, rng.randint(config.minRoomSize[0], config.maxRoomSize[0]));
+  const entranceD = Math.min(grid.depth, rng.randint(config.minRoomSize[1], config.maxRoomSize[1]));
+  const entrance = randomBoundaryRoom(grid, entranceW, entranceD, pickRoomHeight(entranceW * entranceD, rng), 0, rng);
   graph.rooms.push(entrance);
   let nextRegionId = 0;
   const entranceRegions = tryAddRegions(entrance, graph, grid, config, rng, nextRegionId);

@@ -417,7 +417,7 @@ describe("generateFloor - door spacing (2026-09-14)", () => {
     120000
   );
 
-  it("a merged 3-cell-wide door (seed 96, default config) frames one continuous gap span with nothing covering it", () => {
+  it("a merged 3-cell-wide door (seed 85, default config) frames one continuous gap span with nothing covering it", () => {
     // Same shape as the pre-existing "every door's gap cells are uncovered"
     // check above, but specifically for a width>=3 door - the only way one
     // is ever produced (see `pickDoorWidth` - 3 is never a normal roll) -
@@ -430,9 +430,12 @@ describe("generateFloor - door spacing (2026-09-14)", () => {
     // which shifts the RNG sequence for every door after it on a given
     // seed. This test is about merge geometry, not the material system,
     // so it pins materials to the pre-Part-C three-material set (still
-    // one `rng.random()` call per door either way) to keep seed 96
-    // reproducing the exact scenario it was written against.
-    const data = generateFloor(testConfig({ seed: 96, doorMaterials: ["wood", "metal", "stone"] }));
+    // one `rng.random()` call per door either way) to keep the seed
+    // reproducing the exact scenario it was written against. The seed was
+    // 96 until 2026-10-05, when the room-size defaults moved to 3-7 and the
+    // entrance started rolling its own size; 85 is the first seed that
+    // produces a merged door under those defaults.
+    const data = generateFloor(testConfig({ seed: 85, doorMaterials: ["wood", "metal", "stone"] }));
     const door = data.doors.find((d) => d.width >= 3);
     expect(door).toBeDefined();
     const interiors = allSegments(data);
@@ -541,7 +544,7 @@ describe("generateFloor - door quality rolls (locked/trapped/stuck, 2026-09-05)"
     }
   });
 
-  it("produces a mix of locked/trapped/stuck (and combinations) under the confirmed default weights", () => {
+  it("produces a mix of locked/stuck (and combinations) but no trapped doors under the confirmed default weights", () => {
     // Pool doors across many seeds at the real gridsize/default config rather
     // than asserting exact counts against the tunable weights themselves
     // (see Dungeon Data Format.md - "a starting point, not final").
@@ -552,12 +555,14 @@ describe("generateFloor - door quality rolls (locked/trapped/stuck, 2026-09-05)"
     }
     expect(allDoors.length).toBeGreaterThan(50);
     expect(allDoors.some((d) => d.locked)).toBe(true);
-    expect(allDoors.some((d) => d.trapped)).toBe(true);
+    // Doors don't roll traps any more (2026-10-03) - the encounter
+    // generator's traps are the floor's traps, placed by hand.
+    expect(allDoors.some((d) => d.trapped)).toBe(false);
     expect(allDoors.some((d) => d.stuck)).toBe(true);
-    expect(allDoors.some((d) => !d.locked && !d.trapped && !d.stuck)).toBe(true);
-    // At least one door should show a real combination, proving the three
-    // rolls are independent rather than one pick among locked/trapped/stuck.
-    expect(allDoors.some((d) => d.locked && d.trapped)).toBe(true);
+    expect(allDoors.some((d) => !d.locked && !d.stuck)).toBe(true);
+    // At least one door should show a real combination, proving the rolls
+    // are independent rather than one pick among locked/stuck.
+    expect(allDoors.some((d) => d.locked && d.stuck)).toBe(true);
   });
 });
 
@@ -658,6 +663,33 @@ describe("generateFloor - ceiling height distribution", () => {
     },
     20000
   );
+});
+
+describe("generateFloor - room sizes (3-7 default, rolled entrance, 2026-10-05)", () => {
+  it("never places a room with a side under 3 squares, the entrance included, on an uncrowded grid", () => {
+    for (let seed = 0; seed < 12; seed++) {
+      const data = generateFloor(testConfig({ gridWidth: 36, gridDepth: 36, seed }));
+      for (const room of data.rooms) {
+        expect(Math.min(room.w, room.d)).toBeGreaterThanOrEqual(3);
+        expect(Math.max(room.w, room.d)).toBeLessThanOrEqual(7);
+      }
+    }
+  });
+
+  it("rolls the entrance's size instead of fixing it at 2x2", () => {
+    const sizes = new Set<string>();
+    for (let seed = 0; seed < 25; seed++) {
+      const data = generateFloor(testConfig({ gridWidth: 36, gridDepth: 36, seed }));
+      const entrance = data.rooms.find((r) => r.kind === "entrance")!;
+      sizes.add(`${entrance.w}x${entrance.d}`);
+      // Still pinned to the map's edge (the exported grid has a 1-cell wall ring).
+      const onEdge =
+        entrance.x === 1 || entrance.y === 1 || entrance.x + entrance.w === data.grid.width - 1 || entrance.y + entrance.d === data.grid.depth - 1;
+      expect(onEdge).toBe(true);
+    }
+    expect(sizes.size).toBeGreaterThan(5);
+    expect(sizes.has("2x2")).toBe(false);
+  });
 });
 
 describe("generateFloor - special kinds and extra entrances", () => {

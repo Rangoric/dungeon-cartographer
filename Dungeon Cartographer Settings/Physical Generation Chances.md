@@ -12,10 +12,10 @@ Independent per-door rolls, not mutually exclusive with each other.
 | --- | --- |
 | secretDoorChance | 0.05 |
 | lockedDoorChance | 0.3333 |
-| trappedDoorChance | 0.3333 |
+| trappedDoorChance | 0 |
 | stuckDoorChance | 0.1667 |
 
-(lockedDoorChance/trappedDoorChance are 1-in-3, stuckDoorChance is 1-in-6 — see `DEFAULT_GENERATE_CONFIG` in `src/generate.ts`.)
+(lockedDoorChance is 1-in-3, stuckDoorChance is 1-in-6 — see `DEFAULT_GENERATE_CONFIG` in `src/generate.ts`. trappedDoorChance was 1-in-3 until 2026-10-03 and is now 0: doors no longer roll traps. The floor's traps are the 2–3 the encounter generator rolls, placed by hand on a door, on treasure or in a room. A door can still be marked `trapped` by hand in the `.dungeon` file.)
 
 ---
 
