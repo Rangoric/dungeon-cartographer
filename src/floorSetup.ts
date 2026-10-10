@@ -43,6 +43,8 @@ export interface FloorSetup {
    * - this is content-layer input, not a physical-layout knob.
    */
   level: number;
+  /** A fixed map seed from an optional `Map Seed` row (2026-10-10) - "Generate Random Map" uses it instead of a fresh one, so the same map comes out every time. Absent when the row is missing or not a whole number. */
+  mapSeed?: number;
 }
 
 /** The standard *generated-area* size - see Dungeon Generation Notes.md's "The Basics". Exported `.dungeon` grid ends up 2 cells larger on each axis once the outer wall ring is accounted for (see the module header). Level defaults to 1 (the lowest baseline encounter CR). */
@@ -67,9 +69,12 @@ const MAX_LEVEL = 20;
  * mid-edit.
  */
 export function parseFloorSetup(fileText: string): FloorSetup {
+  const mapSeedRow = findSettingRow(fileText, "map seed");
+  const mapSeed = mapSeedRow && /^\d+$/.test(mapSeedRow) ? Number(mapSeedRow) : undefined;
   return {
     ...parseGridSize(fileText),
     level: parseLevel(fileText),
+    ...(mapSeed !== undefined ? { mapSeed } : {}),
   };
 }
 

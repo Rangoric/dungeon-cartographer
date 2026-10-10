@@ -165,3 +165,10 @@ describe("EMPTY_FLOOR_DATA", () => {
     expect(EMPTY_FLOOR_DATA.finalized).toBe(false);
   });
 });
+
+describe("parseDungeonFloor - seed (2026-10-10)", () => {
+  it("keeps a saved seed and leaves it out when the file has none", () => {
+    expect(parseDungeonFloor(`{"seed": 1791665713852}`).seed).toBe(1791665713852);
+    expect("seed" in parseDungeonFloor(`{}`)).toBe(false);
+  });
+});

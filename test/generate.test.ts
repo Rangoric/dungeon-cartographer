@@ -6,6 +6,8 @@ import {
   findCloseDoorPairs,
   configFromFloorSetup,
   DEFAULT_GENERATE_CONFIG,
+  findDoorsSharingGapCells,
+  mergeDoorsSharingGapCells,
   type GenerateConfig,
 } from "../src/generate";
 import type { DungeonBox, DungeonFloorData } from "../src/dungeonData";
@@ -433,9 +435,10 @@ describe("generateFloor - door spacing (2026-09-14)", () => {
     // one `rng.random()` call per door either way) to keep the seed
     // reproducing the exact scenario it was written against. The seed was
     // 96 until 2026-10-05, when the room-size defaults moved to 3-7 and the
-    // entrance started rolling its own size; 85 is the first seed that
-    // produces a merged door under those defaults.
-    const data = generateFloor(testConfig({ seed: 85, doorMaterials: ["wood", "metal", "stone"] }));
+    // entrance started rolling its own size; then 85 until 2026-10-10,
+    // when the one-door-per-gap fix changed which launch points branches
+    // can use. 9 is the first seed that produces a merged door now.
+    const data = generateFloor(testConfig({ seed: 9, doorMaterials: ["wood", "metal", "stone"] }));
     const door = data.doors.find((d) => d.width >= 3);
     expect(door).toBeDefined();
     const interiors = allSegments(data);
@@ -752,5 +755,65 @@ describe("configFromFloorSetup", () => {
     const config = configFromFloorSetup({ gridWidth: 36, gridDepth: 36 }, { seed: 5, footprintTarget: 0.5 });
     expect(config.seed).toBe(5);
     expect(config.footprintTarget).toBe(0.5);
+  });
+});
+
+describe("generateFloor - one door per wall gap (2026-10-10 bug report)", () => {
+  // The reported floor: 34x34, seed 1791665713852. Doors 9 and 30 were both
+  // Room 17 <-> Corridor 4 on the same gap - a loop branch "direct-docked"
+  // onto the corridor that already left Room 17 from that exact spot.
+  it("no longer doubles a door on the reported seed", () => {
+    const data = generateFloor(configFromFloorSetup({ gridWidth: 34, gridDepth: 34, level: 4 }, { seed: 1791665713852 }));
+    expect(findDoorsSharingGapCells(data.doors)).toEqual([]);
+    const room17Corridor4 = data.doors.filter(
+      (d) =>
+        d.connects.some((e) => e.kind === "room" && e.id === 17) && d.connects.some((e) => e.kind === "corridor" && e.id === 4)
+    );
+    expect(room17Corridor4).toHaveLength(1);
+  });
+
+  it("never puts two doors on one gap cell, over many standard-size floors", () => {
+    for (let seed = 1; seed <= 40; seed++) {
+      const data = generateFloor(configFromFloorSetup({ gridWidth: 34, gridDepth: 34, level: 4 }, { seed }));
+      expect(findDoorsSharingGapCells(data.doors)).toEqual([]);
+    }
+  }, 60_000);
+
+  it("merges two doors on one gap into the earlier one, keeping it secret if either was", () => {
+    const base = { connects: [{ kind: "room" as const, id: 1 }, { kind: "corridor" as const, id: 2 }], cellA: [6, 24, 0] as [number, number, number], cellB: [8, 24, 0] as [number, number, number], width: 1, locked: false, trapped: false, stuck: false };
+    const graph = {
+      doors: [
+        { ...base, id: 9, material: "wood", secret: false },
+        { ...base, id: 30, material: "stone", secret: true },
+        { ...base, id: 31, cellA: [6, 20, 0] as [number, number, number], cellB: [8, 20, 0] as [number, number, number], material: "wood", secret: false },
+      ],
+    };
+    mergeDoorsSharingGapCells(graph);
+    expect(graph.doors.map((d) => d.id)).toEqual([9, 31]);
+    // Stone is the more solid material; secret sticks from door 30.
+    expect(graph.doors[0]).toMatchObject({ id: 9, material: "stone", secret: true });
+  });
+
+  it("keeps a merged door secret even when the secret one loses on material", () => {
+    const base = { connects: [{ kind: "room" as const, id: 1 }, { kind: "corridor" as const, id: 2 }], cellA: [6, 24, 0] as [number, number, number], cellB: [8, 24, 0] as [number, number, number], width: 1, locked: false, trapped: false, stuck: false };
+    const graph = { doors: [{ ...base, id: 3, material: "stone", secret: false }, { ...base, id: 7, material: "wood", secret: true }] };
+    mergeDoorsSharingGapCells(graph);
+    expect(graph.doors).toHaveLength(1);
+    expect(graph.doors[0]).toMatchObject({ id: 3, material: "stone", secret: true });
+  });
+
+  it("finds overlaps between a wide door and a narrow one", () => {
+    const wide = { id: 1, cellA: [3, 5, 0] as [number, number, number], cellB: [3, 7, 0] as [number, number, number], width: 2 };
+    const narrow = { id: 2, cellA: [4, 5, 0] as [number, number, number], cellB: [4, 7, 0] as [number, number, number], width: 1 };
+    expect(findDoorsSharingGapCells([wide, narrow])).toEqual([[1, 2, "4,6,0"]]);
+  });
+});
+
+describe("generateFloor - saves its seed (2026-10-10)", () => {
+  it("records the seed it was given, so the same map can be generated again", () => {
+    const config = configFromFloorSetup({ gridWidth: 34, gridDepth: 34, level: 4 }, { seed: 1791665713852 });
+    const data = generateFloor(config);
+    expect(data.seed).toBe(1791665713852);
+    expect(generateFloor(configFromFloorSetup({ gridWidth: 34, gridDepth: 34, level: 4 }, { seed: data.seed }))).toEqual(data);
   });
 });

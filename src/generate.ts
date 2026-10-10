@@ -1131,7 +1131,12 @@ function cellsOf(segments: Box[]): Set<string> {
 }
 
 /** Picks the door's width + cellA/cellB for a branch's end that lands on a room, anchored at the launch point's boundary cell (the door sits exactly where the corridor meets the room - no independent repositioning). */
-function doorAtLaunchPoint(point: LaunchPoint, room: GenRoom, rng: Rng): { width: number; cellA: [number, number, number]; cellB: [number, number, number] } {
+function doorAtLaunchPoint(
+  point: LaunchPoint,
+  room: GenRoom,
+  rng: Rng,
+  takenGaps?: ReadonlySet<string>
+): { width: number; cellA: [number, number, number]; cellB: [number, number, number] } {
   const area = room.w * room.d;
   const crossesX = point.dir[0] !== 0;
   const available = crossesX ? y2(room) - point.boundaryCell[1] : x2(room) - point.boundaryCell[0];
@@ -1139,11 +1144,33 @@ function doorAtLaunchPoint(point: LaunchPoint, room: GenRoom, rng: Rng): { width
 
   const [bx, by] = point.boundaryCell;
   const corridorCell: [number, number] = [bx + point.dir[0] * 2, by + point.dir[1] * 2];
-  return {
+  const pick = {
     width,
-    cellA: [bx, by, point.z],
-    cellB: [corridorCell[0], corridorCell[1], point.z],
+    cellA: [bx, by, point.z] as [number, number, number],
+    cellB: [corridorCell[0], corridorCell[1], point.z] as [number, number, number],
   };
+  // A wider roll mustn't run into a neighboring door's wall gap (2026-10-10).
+  if (takenGaps) {
+    while (pick.width > 1 && doorGapCells(pick).some((gap) => takenGaps.has(gap.join(",")))) pick.width--;
+  }
+  return pick;
+}
+
+/** Every wall-gap cell some door already covers (wider doors cover more than one), as `"x,y,z"`. */
+function takenGapCells(graph: Graph): Set<string> {
+  const taken = new Set<string>();
+  for (const d of graph.doors) for (const gap of doorGapCells(d)) taken.add(gap.join(","));
+  return taken;
+}
+
+/**
+ * True if a door at this launch point would sit on a wall gap another door
+ * already uses - the gap cell is one step back from the launch cell, toward
+ * the room. Such points are skipped everywhere a new door is placed
+ * (2026-10-10 duplicate-door bug).
+ */
+function launchGapTaken(point: LaunchPoint, taken: ReadonlySet<string>): boolean {
+  return taken.has(`${point.cell[0] - point.dir[0]},${point.cell[1] - point.dir[1]},${point.z}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1434,6 +1461,54 @@ function harmonizeCloseDoors(graph: Graph): void {
   }
 }
 
+/**
+ * Validation: every pair of doors that cover a common wall-gap cell, as
+ * `[lowerId, higherId, "x,y,z"]`. A generated floor should never have any
+ * (`mergeDoorsSharingGapCells` removes them); exported so tests and the
+ * plugin can check a floor.
+ */
+export function findDoorsSharingGapCells(
+  doors: readonly Pick<DungeonDoor, "id" | "cellA" | "cellB" | "width">[]
+): [number, number, string][] {
+  const owner = new Map<string, number>();
+  const clashes: [number, number, string][] = [];
+  for (const door of [...doors].sort((a, b) => a.id - b.id)) {
+    for (const gap of doorGapCells(door)) {
+      const cell = gap.join(",");
+      const first = owner.get(cell);
+      if (first !== undefined && first !== door.id) clashes.push([first, door.id, cell]);
+      else owner.set(cell, door.id);
+    }
+  }
+  return clashes;
+}
+
+/**
+ * Last-line cleanup for two doors on the same wall gap (2026-10-10): the
+ * later door is folded into the earlier one. Materials resolve the usual
+ * way (`moreSolidDoor`), but **secret is sticky** - if either door was
+ * secret, the merged door stays secret. Locked/trapped/stuck come along
+ * with the winning material, same as `mergeTwoDoors`. The direct-dock fix
+ * in `growConnectingBranch` stops the one known cause; this catches any
+ * other path that might stack doors, so a floor never ships with two.
+ */
+export function mergeDoorsSharingGapCells(graph: { doors: GenDoor[] }): void {
+  for (let guard = 0; guard < 100; guard++) {
+    const clash = findDoorsSharingGapCells(graph.doors)[0];
+    if (!clash) return;
+    const keep = graph.doors.find((d) => d.id === clash[0])!;
+    const drop = graph.doors.find((d) => d.id === clash[1])!;
+    const winner = moreSolidDoor(keep, drop);
+    keep.material = winner.material;
+    keep.locked = winner.locked;
+    keep.trapped = winner.trapped;
+    keep.stuck = winner.stuck;
+    keep.secret = keep.secret || drop.secret;
+    keep.width = Math.max(keep.width, drop.width);
+    graph.doors = graph.doors.filter((d) => d.id !== drop.id);
+  }
+}
+
 interface CommittedBranch {
   corridor: GenCorridor;
   door: GenDoor | null;
@@ -1467,7 +1542,7 @@ function growConnectingBranch(
   targetCorridorIds: ReadonlySet<number> | null = null
 ): { branch: CommittedBranch; nextCorridorId: number; nextDoorId: number } | null {
   const sourceRoom = graph.rooms.find((r) => r.id === sourceRoomId)!;
-  const sources = roomLaunchPoints(sourceRoom, grid);
+  const allSources = roomLaunchPoints(sourceRoom, grid);
 
   const targets = new Map<string, RouteTarget>();
   const eligibleCorridors = targetCorridorIds ? graph.corridors.filter((c) => targetCorridorIds.has(c.id)) : graph.corridors;
@@ -1485,10 +1560,22 @@ function growConnectingBranch(
   // before the room-target loop below since it can shortcut straight past
   // pathfinding entirely.
   const eligibleCorridorCells = allCorridorCells(eligibleCorridors);
-  const directDockPoint = sources.find((p) => eligibleCorridorCells.has(cellKey(p.cell[0], p.cell[1])));
+  // Skip a launch point whose wall gap already has a door. That happens
+  // when the corridor sitting on the launch cell was grown from (or docked
+  // onto) this exact spot, or when a neighboring wider door already covers
+  // the gap - docking there again stacked a second door on the same wall
+  // gap. Before this check almost every generated floor had one to three
+  // such doubled doors (2026-10-10 bug report: seed 1791665713852, 34x34,
+  // doors 9 and 30, Room 17 <-> Corridor 4).
+  const takenGaps = takenGapCells(graph);
+  const directDockPoint = allSources.find(
+    (p) => eligibleCorridorCells.has(cellKey(p.cell[0], p.cell[1])) && !launchGapTaken(p, takenGaps)
+  );
+  // Search only from (and to) launch points whose wall gap is still free.
+  const sources = allSources.filter((p) => !launchGapTaken(p, takenGaps));
   if (directDockPoint) {
     const targetCorridor = eligibleCorridors.find((c) => c.cells.has(cellKey(directDockPoint.cell[0], directDockPoint.cell[1])))!;
-    const doorPick = doorAtLaunchPoint(directDockPoint, sourceRoom, rng);
+    const doorPick = doorAtLaunchPoint(directDockPoint, sourceRoom, rng, takenGaps);
     const door: GenDoor = {
       id: nextDoorId,
       connects: [{ kind: "room", id: sourceRoom.id }, { kind: "corridor", id: targetCorridor.id }],
@@ -1505,6 +1592,7 @@ function growConnectingBranch(
     if (room.id === sourceRoomId) continue;
     if (targetRoomIds && !targetRoomIds.has(room.id)) continue;
     for (const point of roomLaunchPoints(room, grid)) {
+      if (launchGapTaken(point, takenGaps)) continue;
       targets.set(cellKey(point.cell[0], point.cell[1]), { kind: "room", roomId: room.id, point });
     }
   }
@@ -1609,7 +1697,7 @@ function commitRoute(
 
   // Roll the start door (if the source is a room) BEFORE the width roll, since
   // corridor width is biased by whether either attached door is 10' wide.
-  const startDoorPick = doorAtLaunchPoint(route.sourcePoint, sourceRoom, rng);
+  const startDoorPick = doorAtLaunchPoint(route.sourcePoint, sourceRoom, rng, takenGapCells(graph));
   let endDoorPick: ReturnType<typeof doorAtLaunchPoint> | null = null;
   let endRoom: GenRoom | null = null;
   if (route.target.kind === "room") {
@@ -1625,7 +1713,7 @@ function commitRoute(
     // route's OTHER launch point (the target room's own launch point at
     // the docking cell), rolled independently.
     const targetPoint = (route.target as { kind: "room"; roomId: number; point: LaunchPoint }).point;
-    endDoorPick = doorAtLaunchPoint(targetPoint, endRoom, rng);
+    endDoorPick = doorAtLaunchPoint(targetPoint, endRoom, rng, takenGapCells(graph));
   }
 
   const rawSegments = compactPathToSegments(route.path, sourceRoom.z, height);
@@ -1824,7 +1912,10 @@ function growSpur(
 
   if (fromRoom) {
     sourceRoom = rng.choice(graph.rooms);
-    const points = roomLaunchPoints(sourceRoom, grid).filter((p) => !roomBlocked.has(cellKey(p.cell[0], p.cell[1])) && !occupied.has(cellKey(p.cell[0], p.cell[1])));
+    const taken = takenGapCells(graph);
+    const points = roomLaunchPoints(sourceRoom, grid).filter(
+      (p) => !roomBlocked.has(cellKey(p.cell[0], p.cell[1])) && !occupied.has(cellKey(p.cell[0], p.cell[1])) && !launchGapTaken(p, taken)
+    );
     if (!points.length) return null;
     // Same door-spacing preference as `growConnectingBranch` (see the
     // section comment above `doorProximityPenalty`), just expressed as a
@@ -1880,7 +1971,7 @@ function growSpur(
   let width = 1;
   let doorPick: ReturnType<typeof doorAtLaunchPoint> | null = null;
   if (sourceRoom) {
-    doorPick = doorAtLaunchPoint(start, sourceRoom, rng);
+    doorPick = doorAtLaunchPoint(start, sourceRoom, rng, takenGapCells(graph));
     width = pickCorridorWidth(doorPick.width === 2, config, rng);
   } else {
     width = pickCorridorWidth(false, config, rng);
@@ -2037,7 +2128,8 @@ function addStairs(graph: Graph, grid: GridSize, config: GenerateConfig, rng: Rn
     // every other room-to-corridor attach uses), oriented so its long axis
     // runs away from the room rather than along the wall.
     const base = rng.choice(graph.rooms);
-    const sources = roomLaunchPoints(base, grid).filter((p) => !roomBlocked.has(cellKey(p.cell[0], p.cell[1])));
+    const taken = takenGapCells(graph);
+    const sources = roomLaunchPoints(base, grid).filter((p) => !roomBlocked.has(cellKey(p.cell[0], p.cell[1])) && !launchGapTaken(p, taken));
     if (!sources.length) continue;
     const source = rng.choice(sources);
 
@@ -2051,7 +2143,7 @@ function addStairs(graph: Graph, grid: GridSize, config: GenerateConfig, rng: Rn
     const collidesWithCorridors = graph.corridors.some((c) => c.segments.some((seg) => marginOverlaps(stairBox, WALL_GAP, seg)));
     if (!isWithin(stairBox, grid) || collidesWithRoomsAndStairs(graph, [stairBox]) || collidesWithCorridors) continue;
 
-    const doorPick = doorAtLaunchPoint(source, base, rng);
+    const doorPick = doorAtLaunchPoint(source, base, rng, taken);
     graph.stairs.push({ id: nextStairId, box: stairBox, style, floorsDown, roomId: base.id, embedded: false });
     // A freestanding stair has no `DungeonConnection` kind of its own (only
     // "room"/"corridor" exist) - the door's far side is documented as
@@ -2332,8 +2424,10 @@ export function generateFloor(config: GenerateConfig): DungeonFloorData {
   mergeAdjacentDoors(graph);
   harmonizeCloseDoors(graph);
   addStairs(graph, grid, config, rng);
+  mergeDoorsSharingGapCells(graph);
 
   let data = toDungeonFloorData(graph);
+  if (config.seed !== undefined) data.seed = config.seed;
   data = assignSpecialKindsOnData(data, config.specialKinds);
   data = markExtraEntrancesOnData(data, grid, config, rng);
   return data;

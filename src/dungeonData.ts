@@ -165,6 +165,13 @@ export interface DungeonFloorData {
    * editable rather than silently locked.
    */
   finalized: boolean;
+  /**
+   * The RNG seed "Generate Random Map" used for this floor (added
+   * 2026-10-10), so the exact map can be generated again - in a test, or
+   * by putting it in the Setup file's `Map Seed` row. Absent on files
+   * written before then, or written by hand.
+   */
+  seed?: number;
 }
 
 /** Shown before any real floor file has been loaded. */
@@ -215,6 +222,7 @@ function normalizeDungeonFloor(raw: unknown): DungeonFloorData {
     // Missing key => not finalized, per the "editable by default" decision
     // above - only an explicit `true` locks a floor.
     finalized: r.finalized === true,
+    ...(typeof r.seed === "number" && Number.isFinite(r.seed) ? { seed: r.seed } : {}),
   };
 }
 

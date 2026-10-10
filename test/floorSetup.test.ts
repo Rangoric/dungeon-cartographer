@@ -78,3 +78,15 @@ describe("DEFAULT_FLOOR_SETUP", () => {
     expect(DEFAULT_FLOOR_SETUP).toEqual({ gridWidth: 34, gridDepth: 34, level: 1 });
   });
 });
+
+describe("parseFloorSetup - Map Seed (2026-10-10)", () => {
+  it("reads an optional Map Seed row", () => {
+    const text = `| Grid Size | 34 × 34 |\n| Level | 4 |\n| Map Seed | 1791665713852 |\n| Seed | 12 |`;
+    expect(parseFloorSetup(text)).toEqual({ gridWidth: 34, gridDepth: 34, level: 4, mapSeed: 1791665713852 });
+  });
+
+  it("leaves mapSeed out when the row is missing or not a whole number", () => {
+    expect("mapSeed" in parseFloorSetup(`| Level | 4 |\n| Seed | 12 |`)).toBe(false);
+    expect("mapSeed" in parseFloorSetup(`| Map Seed | soon |`)).toBe(false);
+  });
+});

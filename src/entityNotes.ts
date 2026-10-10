@@ -18,6 +18,18 @@
 // folder, not a path this module can build outright. See main.ts's
 // `resolveRoomNoteFile`.
 
+/**
+ * Does a note's file name belong to room `roomId`? Matches the `Room <NN>`
+ * convention with optional zero-padding and anything after a space:
+ * "Room 8", "Room 08", "Room 08 - Lair" all match room 8; "Room 18" and
+ * "Room 8x" don't. Pulled out of main.ts on 2026-10-10: the pattern was
+ * built in a template literal there, which silently turned every `\s`
+ * into a plain `s` ("^Rooms+0*8(?:s|$)"), so no room note was ever found.
+ */
+export function isRoomNoteName(basename: string, roomId: number): boolean {
+  return new RegExp(String.raw`^Room\s+0*${roomId}(?:\s|$)`, "i").test(basename);
+}
+
 /** `Floor N/Corridors/Corridor <id>.md` - id-keyed, exact path, per Plan B3. `folder` mirrors `main.ts`'s `setupFilePathFor` convention (the dungeon's own folder with a trailing slash already applied, or `""` at vault root). */
 export function corridorNotePathFor(folder: string, floorBasename: string, corridorId: number): string {
   return `${folder}${floorBasename}/Corridors/Corridor ${corridorId}.md`;

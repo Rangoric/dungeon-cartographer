@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildCorridorStubMarkdown, corridorNotePathFor, noteHoverExcerpt } from "../src/entityNotes";
+import { buildCorridorStubMarkdown, corridorNotePathFor, isRoomNoteName, noteHoverExcerpt } from "../src/entityNotes";
 import { buildDoorNoteMarkdown, type DoorNoteParams } from "../src/doorNotes";
 import { DEFAULT_LOCK_TRAP_RULES } from "../src/lockTrapRules";
 import type { DungeonDoor } from "../src/dungeonData";
@@ -92,5 +92,23 @@ describe("noteHoverExcerpt", () => {
     const excerpt = noteHoverExcerpt(`Corridor 9\n\n${longLine}`, 50);
     expect(excerpt.length).toBe(50);
     expect(excerpt.endsWith("…")).toBe(true);
+  });
+});
+
+describe("isRoomNoteName (2026-10-10 bug report: room notes were never found)", () => {
+  it("matches Room <id> with optional zero-padding and a trailing name", () => {
+    expect(isRoomNoteName("Room 8", 8)).toBe(true);
+    expect(isRoomNoteName("Room 08", 8)).toBe(true);
+    expect(isRoomNoteName("Room 08 - Lair", 8)).toBe(true);
+    expect(isRoomNoteName("room 8 - lair", 8)).toBe(true);
+    expect(isRoomNoteName("Room 0", 0)).toBe(true);
+  });
+
+  it("doesn't match another room's id or a longer number", () => {
+    expect(isRoomNoteName("Room 18", 8)).toBe(false);
+    expect(isRoomNoteName("Room 80", 8)).toBe(false);
+    expect(isRoomNoteName("Room 8x", 8)).toBe(false);
+    expect(isRoomNoteName("Rooms8", 8)).toBe(false);
+    expect(isRoomNoteName("Door 8", 8)).toBe(false);
   });
 });

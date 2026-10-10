@@ -14,7 +14,7 @@ import {
   pickTrapFlavor,
   rollDoorChallengeLevel,
 } from "./doorNotes";
-import { buildCorridorStubMarkdown, corridorNotePathFor, noteHoverExcerpt } from "./entityNotes";
+import { buildCorridorStubMarkdown, corridorNotePathFor, isRoomNoteName, noteHoverExcerpt } from "./entityNotes";
 import {
   buildEncounterNoteMarkdown,
   generateEncounters,
@@ -373,9 +373,8 @@ class DungeonView extends ItemView {
 
     // owner.kind === "room"
     if (!(file.parent instanceof TFolder)) return null;
-    const pattern = new RegExp(`^Room\s+0*${owner.id}(?:\s|$)`, "i");
     for (const child of file.parent.children) {
-      if (child instanceof TFile && pattern.test(child.basename)) return child;
+      if (child instanceof TFile && isRoomNoteName(child.basename, owner.id)) return child;
     }
     return null;
   }
@@ -564,7 +563,9 @@ class DungeonView extends ItemView {
     try {
       const file = this.file;
       const setup = await this.loadFloorSetup();
-      const config = configFromFloorSetup(setup, { seed: Date.now() });
+      // A `Map Seed` row in the Setup file pins the map; otherwise a fresh
+      // seed. Either way it's saved in the .dungeon file (`seed`).
+      const config = configFromFloorSetup(setup, { seed: setup.mapSeed ?? Date.now() });
       const data = generateFloor(config);
       await this.writeFloorData(data);
       try {
