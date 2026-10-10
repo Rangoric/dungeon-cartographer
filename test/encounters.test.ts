@@ -18,6 +18,8 @@ import {
   type EncounterGenInput,
   type PoolMonster,
 } from "../src/encounters";
+import { FACTION_DEFAULT_FILES } from "../src/factionDefaults";
+import { SETTINGS_DEFAULT_FILES } from "../src/settingsDefaults";
 
 const FACTION_TEXT = `---
 name: Modron
@@ -371,5 +373,26 @@ describe("buildEncounterNoteMarkdown", () => {
     expect(md).toContain("## Encounters");
     expect(md).toContain("Faction: [[Modron]]");
     expect(md.match(/^\| E\d+ \|/gm)!.length + md.match(/^\| T\d+ \|/gm)!.length).toBe(result.encounters.length);
+  });
+});
+
+describe("the shipped faction files", () => {
+  it("bundles Angels, Demons, Devils and Modron, each with encounters at every CR from 1 to 10", () => {
+    expect(Object.keys(FACTION_DEFAULT_FILES).sort()).toEqual(["Angels.md", "Demons.md", "Devils.md", "Modron.md"]);
+    for (const [fileName, text] of Object.entries(FACTION_DEFAULT_FILES)) {
+      const faction = parseFactionFile(fileName.replace(/\.md$/, ""), text);
+      const crs = new Set(faction.encounters.map((e) => e.cr));
+      for (let cr = 1; cr <= 10; cr++) expect(crs.has(cr)).toBe(true);
+      for (const e of faction.encounters) {
+        expect(e.monsters.length).toBeGreaterThan(0);
+        expect(Math.round(e.el)).toBe(e.cr);
+      }
+    }
+  });
+
+  it("ships them to the settings folder's Factions subfolder", () => {
+    for (const name of Object.keys(FACTION_DEFAULT_FILES)) {
+      expect(SETTINGS_DEFAULT_FILES[`Factions/${name}`]).toBe(FACTION_DEFAULT_FILES[name]);
+    }
   });
 });

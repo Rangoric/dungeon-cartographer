@@ -11,6 +11,7 @@ import dungeonMonstersBase from "../Dungeon Cartographer Settings/Dungeon Monste
 import lockTrapStuckDoorDCs from "../Dungeon Cartographer Settings/Lock, Trap & Stuck Door DCs.md";
 import sampleTraps from "../Dungeon Cartographer Settings/Sample Traps.md";
 import { TREASURE_DEFAULT_FILES, TREASURE_FOLDER_NAME } from "./treasureDefaults";
+import { FACTION_DEFAULT_FILES, FACTIONS_FOLDER_NAME } from "./factionDefaults";
 
 /** File path relative to the vault's settings folder -> contents. */
 export const SETTINGS_DEFAULT_FILES: Record<string, string> = {
@@ -19,8 +20,11 @@ export const SETTINGS_DEFAULT_FILES: Record<string, string> = {
   "Dungeon Monsters.base": dungeonMonstersBase,
   "Lock, Trap & Stuck Door DCs.md": lockTrapStuckDoorDCs,
   "Sample Traps.md": sampleTraps,
-  // Treasure tables go in their own subfolder (settingsSync creates it).
+  // Treasure tables and faction files go in their own subfolders (settingsSync creates them).
   ...Object.fromEntries(
     Object.entries(TREASURE_DEFAULT_FILES).map(([name, text]) => [`${TREASURE_FOLDER_NAME}/${name}`, text])
+  ),
+  ...Object.fromEntries(
+    Object.entries(FACTION_DEFAULT_FILES).map(([name, text]) => [`${FACTIONS_FOLDER_NAME}/${name}`, text])
   ),
 };

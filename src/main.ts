@@ -30,11 +30,12 @@ import {
 import { buildTreasureMarkdown, readTreasureSettings, rollFloorTreasure } from "./treasure";
 import { parseTreasureFile, type TreasureTables } from "./treasureTables";
 import { TREASURE_DEFAULT_FILES, TREASURE_FOLDER_NAME } from "./treasureDefaults";
+import { FACTION_DEFAULT_FILES, FACTIONS_FOLDER_NAME } from "./factionDefaults";
 
 /** Where the vault's monster stat-block notes live - the random-pick pool for encounter generation. */
 const MONSTER_FOLDER = "Source Data/Monsters";
 /** Faction files: `Dungeon Cartographer Settings/Factions/<Name>.md`, name-matched to the Setup file's Factions row. */
-const FACTIONS_FOLDER = `${SETTINGS_FOLDER_NAME}/Factions`;
+const FACTIONS_FOLDER = `${SETTINGS_FOLDER_NAME}/${FACTIONS_FOLDER_NAME}`;
 /** Same filter as `Dungeon Monsters.base`: a monster belongs in dungeons if its terrain_hex includes Underground or Any. */
 const DUNGEON_TERRAINS = ["underground", "any"];
 
@@ -795,7 +796,10 @@ export default class DungeonCartographerPlugin extends Plugin {
       }
       const factions: Faction[] = [];
       for (const name of factionNames) {
-        const text = await this.readVaultText(`${FACTIONS_FOLDER}/${name}.md`);
+        // The vault's copy wins; the plugin's bundled copy stands in for a
+        // shipped faction the vault doesn't have (before "Reset Settings to
+        // Defaults" has ever been run).
+        const text = (await this.readVaultText(`${FACTIONS_FOLDER}/${name}.md`)) ?? FACTION_DEFAULT_FILES[`${name}.md`] ?? null;
         if (text === null) {
           extraFlags.push(`No faction file "${FACTIONS_FOLDER}/${name}.md" - its slot went to a random monster.`);
           continue;
