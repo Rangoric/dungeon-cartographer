@@ -5,7 +5,7 @@ import { generateFloor, configFromFloorSetup, Rng } from "./generate";
 import { parseFloorSetup, DEFAULT_FLOOR_SETUP, type FloorSetup } from "./floorSetup";
 import { copySettingsDefaults, SETTINGS_FOLDER_NAME } from "./settingsSync";
 import { SETTINGS_DEFAULT_FILES } from "./settingsDefaults";
-import { parseLockTrapRules, DEFAULT_LOCK_TRAP_RULES, type LockTrapRules } from "./lockTrapRules";
+import { parseLockTrapRules, rollLockedDoorDC, DEFAULT_LOCK_TRAP_RULES, type LockTrapRules } from "./lockTrapRules";
 import {
   buildDoorNoteMarkdown,
   doorNeedsNote,
@@ -530,6 +530,7 @@ class DungeonView extends ItemView {
     for (const door of flaggedDoors) {
       const challengeLevel = rollDoorChallengeLevel(rng, floorLevel);
       const trapFlavor = door.trapped ? pickTrapFlavor(rng, sampleTrapsText) : null;
+      const lockRoll = door.locked ? rollLockedDoorDC(rules, floorLevel, rng) : null;
       const content = buildDoorNoteMarkdown({
         door,
         floorBasename: file.basename,
@@ -537,6 +538,7 @@ class DungeonView extends ItemView {
         floorLevel,
         rules,
         trapFlavor,
+        lockRoll,
       });
       await this.app.vault.create(doorNotePathFor(folder, file.basename, door.id), content);
     }

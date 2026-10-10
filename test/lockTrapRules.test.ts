@@ -2,22 +2,24 @@ import { describe, it, expect } from "vitest";
 import {
   parseLockTrapRules,
   DEFAULT_LOCK_TRAP_RULES,
-  lookupLockedDoorDC,
+  lockDiceLabel,
+  rollLockedDoorDC,
   lookupTrappedDoorDC,
   lookupStuckDoorBreakDC,
 } from "../src/lockTrapRules";
+import { Rng } from "../src/generate";
 
 const REAL_FILE_TEXT = `
 Some intro prose about where this table lives and how it's used.
 
 ## Locked doors — Open Lock DC
 
-| Floor Level | Lock Quality | Open Lock DC |
-| --- | --- | --- |
-| 1–5   | Very simple | 20 |
-| 6–10  | Average     | 25 |
-| 11–15 | Good        | 30 |
-| 16–20 | Superior    | 40 |
+Open Lock DC = Floor Level + Base + Die
+
+| Open Lock DC | Value |
+| --- | --- |
+| Base | 20 |
+| Die | 1d10 |
 
 ## Trapped doors — Search / Disable Device DC
 
@@ -46,14 +48,22 @@ describe("parseLockTrapRules", () => {
     expect(parseLockTrapRules(REAL_FILE_TEXT)).toEqual(DEFAULT_LOCK_TRAP_RULES);
   });
 
-  it("is tolerant of extra spacing and a lowercase hyphen instead of an en dash", () => {
-    const text = `| Floor Level | Lock Quality | Open Lock DC |\n| --- | --- | --- |\n|  1-5  |   Very simple   |  20  |`;
-    expect(parseLockTrapRules(text).lockedDoorDC).toEqual([
-      { minLevel: 1, maxLevel: 5, quality: "Very simple", dc: 20 },
-    ]);
+  it("reads a retuned lock formula, tolerant of spacing and case", () => {
+    const text = `| Open Lock DC | Value |\n| --- | --- |\n|  base  |  15  |\n| DIE | 2d6 |`;
+    expect(parseLockTrapRules(text).lockedDoorDC).toEqual({ base: 15, diceCount: 2, diceSides: 6 });
+    expect(parseLockTrapRules(`| Open Lock DC | Value |\n| --- | --- |\n| Die | d12 |`).lockedDoorDC).toEqual({
+      base: 20,
+      diceCount: 1,
+      diceSides: 12,
+    });
   });
 
-  it("falls back to the default locked-door table when it's missing entirely", () => {
+  it("keeps the default formula for the old lock-quality tier table", () => {
+    const text = `| Floor Level | Lock Quality | Open Lock DC |\n| --- | --- | --- |\n| 1–5 | Very simple | 20 |\n| 6–10 | Average | 25 |`;
+    expect(parseLockTrapRules(text).lockedDoorDC).toEqual(DEFAULT_LOCK_TRAP_RULES.lockedDoorDC);
+  });
+
+  it("falls back to the default locked-door formula when it's missing entirely", () => {
     const text = `# Nothing here but prose.`;
     expect(parseLockTrapRules(text).lockedDoorDC).toEqual(DEFAULT_LOCK_TRAP_RULES.lockedDoorDC);
   });
@@ -78,8 +88,8 @@ describe("parseLockTrapRules", () => {
     expect(parseLockTrapRules(text).stuckDoorBreakDC.stuckOnly).toBe(12);
   });
 
-  it("ignores rows with the wrong column count rather than misreading them", () => {
-    const text = `| Floor Level | Lock Quality | Open Lock DC |\n| --- | --- | --- |\n| 1–5 | Very simple |`;
+  it("ignores unreadable formula values rather than misreading them", () => {
+    const text = `| Open Lock DC | Value |\n| --- | --- |\n| Base | lots |\n| Die | a few |`;
     expect(parseLockTrapRules(text).lockedDoorDC).toEqual(DEFAULT_LOCK_TRAP_RULES.lockedDoorDC);
   });
 
@@ -94,27 +104,32 @@ describe("parseLockTrapRules", () => {
   });
 });
 
-describe("lookupLockedDoorDC", () => {
-  it("returns the tier containing the level", () => {
-    expect(lookupLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 8)).toEqual({
-      minLevel: 6,
-      maxLevel: 10,
-      quality: "Average",
-      dc: 25,
-    });
+describe("rollLockedDoorDC", () => {
+  it("rolls floor Level + 20 + 1d10 with the default formula", () => {
+    const rng = new Rng(4);
+    const seen = new Set<number>();
+    for (let i = 0; i < 400; i++) {
+      const { dc, roll } = rollLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 4, rng);
+      expect(roll).toBeGreaterThanOrEqual(1);
+      expect(roll).toBeLessThanOrEqual(10);
+      expect(dc).toBe(4 + 20 + roll);
+      seen.add(dc);
+    }
+    // Every DC from 25 to 34 turns up.
+    expect([...seen].sort((a, b) => a - b)).toEqual([25, 26, 27, 28, 29, 30, 31, 32, 33, 34]);
   });
 
-  it("returns the boundary tiers at exact edges", () => {
-    expect(lookupLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 1).dc).toBe(20);
-    expect(lookupLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 20).dc).toBe(40);
+  it("scales with the floor's Level", () => {
+    const fixed = { randint: () => 7 };
+    expect(rollLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 1, fixed)).toEqual({ dc: 28, roll: 7 });
+    expect(rollLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 12, fixed)).toEqual({ dc: 39, roll: 7 });
   });
 
-  it("clamps below the lowest tier rather than returning undefined", () => {
-    expect(lookupLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 0).dc).toBe(20);
-  });
-
-  it("clamps above the highest tier rather than returning undefined", () => {
-    expect(lookupLockedDoorDC(DEFAULT_LOCK_TRAP_RULES, 99).dc).toBe(40);
+  it("uses a retuned formula's base and dice", () => {
+    const rules = { ...DEFAULT_LOCK_TRAP_RULES, lockedDoorDC: { base: 15, diceCount: 2, diceSides: 6 } };
+    expect(rollLockedDoorDC(rules, 3, { randint: () => 6 })).toEqual({ dc: 30, roll: 12 });
+    expect(lockDiceLabel(rules)).toBe("2d6");
+    expect(lockDiceLabel(DEFAULT_LOCK_TRAP_RULES)).toBe("1d10");
   });
 });
 
@@ -157,7 +172,7 @@ describe("lookupStuckDoorBreakDC", () => {
 
 describe("DEFAULT_LOCK_TRAP_RULES", () => {
   it("matches the live vault file's current values", () => {
-    expect(DEFAULT_LOCK_TRAP_RULES.lockedDoorDC).toHaveLength(4);
+    expect(DEFAULT_LOCK_TRAP_RULES.lockedDoorDC).toEqual({ base: 20, diceCount: 1, diceSides: 10 });
     expect(DEFAULT_LOCK_TRAP_RULES.trappedDoorDC).toHaveLength(5);
     expect(DEFAULT_LOCK_TRAP_RULES.stuckDoorBreakDC).toEqual({
       stuckOnly: 15,

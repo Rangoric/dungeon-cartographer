@@ -25,12 +25,10 @@
 // Example file contents (see the live file for the real prose around each
 // table):
 //
-//   | Floor Level | Lock Quality | Open Lock DC |
-//   | --- | --- | --- |
-//   | 1–5   | Very simple | 20 |
-//   | 6–10  | Average     | 25 |
-//   | 11–15 | Good        | 30 |
-//   | 16–20 | Superior    | 40 |
+//   | Open Lock DC | Value |
+//   | --- | --- |
+//   | Base | 20 |
+//   | Die | 1d10 |
 //
 //   | Floor Level | Search / Disable Device DC |
 //   | --- | --- |
@@ -47,12 +45,22 @@
 //   | Stuck + Trapped | 20 |
 //   | Stuck + Locked + Trapped | 25 |
 
-/** One row of the locked-door table: a floor-level band mapped to a lock quality and its Open Lock DC. */
-export interface LockedDoorTier {
-  minLevel: number;
-  maxLevel: number;
-  quality: string;
+/**
+ * The locked-door formula: Open Lock DC = floor Level + `base` + a roll of
+ * `diceCount`d`diceSides`. Replaced the SRD lock-quality tiers (DC 20 for
+ * floors 1-5, 25 for 6-10, ...) on 2026-10-04 - those were too low, and
+ * every lock on a floor had the same DC.
+ */
+export interface LockDCFormula {
+  base: number;
+  diceCount: number;
+  diceSides: number;
+}
+
+/** A rolled lock: the final DC and what the dice showed. */
+export interface LockRoll {
   dc: number;
+  roll: number;
 }
 
 /** One row of the trapped-door table: a floor level mapped to its Search/Disable Device DC. */
@@ -70,19 +78,14 @@ export interface StuckDoorBreakDC {
 }
 
 export interface LockTrapRules {
-  lockedDoorDC: LockedDoorTier[];
+  lockedDoorDC: LockDCFormula;
   trappedDoorDC: TrappedDoorPoint[];
   stuckDoorBreakDC: StuckDoorBreakDC;
 }
 
 /** The table values as they stand in the live vault file as of 2026-09-25 - see the module header for the file path. */
 export const DEFAULT_LOCK_TRAP_RULES: LockTrapRules = {
-  lockedDoorDC: [
-    { minLevel: 1, maxLevel: 5, quality: "Very simple", dc: 20 },
-    { minLevel: 6, maxLevel: 10, quality: "Average", dc: 25 },
-    { minLevel: 11, maxLevel: 15, quality: "Good", dc: 30 },
-    { minLevel: 16, maxLevel: 20, quality: "Superior", dc: 40 },
-  ],
+  lockedDoorDC: { base: 20, diceCount: 1, diceSides: 10 },
   trappedDoorDC: [
     { level: 1, dc: 20 },
     { level: 5, dc: 24 },
@@ -115,24 +118,30 @@ export function parseLockTrapRules(fileText: string): LockTrapRules {
 
 const EN_DASH_RANGE = /^(\d+)\s*[–-]\s*(\d+)$/;
 
-function parseLockedDoorTable(fileText: string): LockedDoorTier[] {
-  const tiers: LockedDoorTier[] = [];
+/**
+ * Reads the `| Open Lock DC | Value |` table's `Base` and `Die` rows
+ * (`| Base | 20 |`, `| Die | 1d10 |`). Either row missing or unreadable
+ * keeps that part of the default formula.
+ */
+function parseLockedDoorTable(fileText: string): LockDCFormula {
+  const formula = { ...DEFAULT_LOCK_TRAP_RULES.lockedDoorDC };
 
-  for (const row of findTableRows(fileText, 3)) {
-    const [levelBand, quality, dcCell] = row;
-    const range = levelBand.trim().match(EN_DASH_RANGE);
-    const dc = Number.parseInt(dcCell.trim(), 10);
-    if (!range || !quality.trim() || !Number.isFinite(dc)) continue;
-
-    const minLevel = Number.parseInt(range[1], 10);
-    const maxLevel = Number.parseInt(range[2], 10);
-    if (!Number.isFinite(minLevel) || !Number.isFinite(maxLevel) || minLevel > maxLevel) continue;
-
-    tiers.push({ minLevel, maxLevel, quality: quality.trim(), dc });
+  for (const row of findTableRows(fileText, 2)) {
+    const [nameCell, valueCell] = row;
+    const name = nameCell.trim().toLowerCase();
+    if (name === "base") {
+      const base = Number.parseInt(valueCell.trim(), 10);
+      if (Number.isFinite(base)) formula.base = base;
+    } else if (name === "die" || name === "dice") {
+      const dice = valueCell.trim().match(/^(\d*)d(\d+)$/i);
+      if (dice && Number(dice[2]) > 0) {
+        formula.diceCount = dice[1] ? Math.max(1, Number(dice[1])) : 1;
+        formula.diceSides = Number(dice[2]);
+      }
+    }
   }
 
-  tiers.sort((a, b) => a.minLevel - b.minLevel);
-  return tiers.length > 0 ? tiers : DEFAULT_LOCK_TRAP_RULES.lockedDoorDC;
+  return formula;
 }
 
 function parseTrappedDoorTable(fileText: string): TrappedDoorPoint[] {
@@ -206,8 +215,8 @@ function findTableRows(fileText: string, columnCount: number): string[][] {
 
 const HEADER_CELLS = new Set([
   "floor level",
-  "lock quality",
   "open lock dc",
+  "value",
   "search / disable device dc",
   "condition",
   "break dc",
@@ -218,18 +227,24 @@ function isHeaderRow(cells: string[]): boolean {
 }
 
 /**
- * Look up the Open Lock DC for a door's challenge level, clamped to the
- * table's own min/max tier so an out-of-range level (shouldn't happen once
- * levels are clamped 1-20 upstream, same as `floorSetup.ts`'s Level field)
- * still resolves rather than returning `undefined`.
+ * Rolls a locked door's Open Lock DC: floor Level + base + the formula's
+ * dice. Uses the floor's own Level, not the door's rolled challenge level
+ * (that one only drives a hand-placed door trap's DC).
  */
-export function lookupLockedDoorDC(rules: LockTrapRules, level: number): LockedDoorTier {
-  const tiers = rules.lockedDoorDC.length > 0 ? rules.lockedDoorDC : DEFAULT_LOCK_TRAP_RULES.lockedDoorDC;
+export function rollLockedDoorDC(
+  rules: LockTrapRules,
+  floorLevel: number,
+  rng: { randint(a: number, b: number): number }
+): LockRoll {
+  const { base, diceCount, diceSides } = rules.lockedDoorDC;
+  let roll = 0;
+  for (let i = 0; i < diceCount; i++) roll += rng.randint(1, diceSides);
+  return { dc: floorLevel + base + roll, roll };
+}
 
-  const tier = tiers.find((t) => level >= t.minLevel && level <= t.maxLevel);
-  if (tier) return tier;
-
-  return level < tiers[0].minLevel ? tiers[0] : tiers[tiers.length - 1];
+/** `"1d10"` for the formula's dice. */
+export function lockDiceLabel(rules: LockTrapRules): string {
+  return `${rules.lockedDoorDC.diceCount}d${rules.lockedDoorDC.diceSides}`;
 }
 
 /**

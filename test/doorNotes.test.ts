@@ -128,9 +128,9 @@ describe("doorNeedsNote", () => {
 });
 
 describe("buildDoorNoteMarkdown", () => {
-  it("includes id/connects/material and the challenge level with its bump", () => {
+  it("includes id/connects/material, and the challenge level with its bump for a trapped door", () => {
     const md = buildDoorNoteMarkdown({
-      door: makeDoor({ locked: true }),
+      door: makeDoor({ trapped: true }),
       floorBasename: "Floor 1",
       challengeLevel: 3,
       floorLevel: 1,
@@ -143,7 +143,7 @@ describe("buildDoorNoteMarkdown", () => {
 
   it("omits the bump suffix when the challenge level equals the floor level", () => {
     const md = buildDoorNoteMarkdown({
-      door: makeDoor({ locked: true }),
+      door: makeDoor({ trapped: true }),
       floorBasename: "Floor 1",
       challengeLevel: 1,
       floorLevel: 1,
@@ -154,18 +154,33 @@ describe("buildDoorNoteMarkdown", () => {
     expect(md).not.toContain("+ 0");
   });
 
-  it("shows a Locked line with the looked-up DC/quality when locked", () => {
+  it("shows a Locked line with the rolled Open Lock DC and how it was reached", () => {
     const md = buildDoorNoteMarkdown({
       door: makeDoor({ locked: true }),
       floorBasename: "Floor 1",
-      challengeLevel: 1,
-      floorLevel: 1,
+      challengeLevel: 6,
+      floorLevel: 4,
+      rules: DEFAULT_LOCK_TRAP_RULES,
+      trapFlavor: null,
+      lockRoll: { dc: 31, roll: 7 },
+    });
+    expect(md).toContain("**Locked:** Open Lock DC 31 (floor Level 4 + 20 + 7 on 1d10)");
+    expect(md).not.toContain("**Trapped:**");
+    expect(md).not.toContain("**Stuck:**");
+    // The challenge level only matters for a trap, so a lock-only door doesn't show it.
+    expect(md).not.toContain("**Challenge level:**");
+  });
+
+  it("shows the formula's range when no lock roll was passed", () => {
+    const md = buildDoorNoteMarkdown({
+      door: makeDoor({ locked: true }),
+      floorBasename: "Floor 1",
+      challengeLevel: 4,
+      floorLevel: 4,
       rules: DEFAULT_LOCK_TRAP_RULES,
       trapFlavor: null,
     });
-    expect(md).toContain("**Locked:** DC 20 (Very simple)");
-    expect(md).not.toContain("**Trapped:**");
-    expect(md).not.toContain("**Stuck:**");
+    expect(md).toContain("**Locked:** Open Lock DC 25–34 (floor Level 4 + 20 + 1d10, not rolled)");
   });
 
   it("shows a Trapped line with the trap flavor's name/description when trapped", () => {

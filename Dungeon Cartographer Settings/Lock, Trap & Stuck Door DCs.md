@@ -2,7 +2,7 @@ First of the `Dungeon Generation/Rules/` folder sketched (never built) in [[Dung
 
 Moved into the **Dungeon Cartographer Settings** system 2026-09-18 (see "Dungeon Generation/Dungeon Cartographer Settings Plan.md") — same "external tunable table" spirit as the other settings files, shipped/reset the same way. This is the plugin-shipped default; the version to hand-edit lives in the vault's `Dungeon Cartographer Settings/` folder.
 
-Keys off a floor's `Level` (the row in `Floor N Setup.md`, parsed by `src/floorSetup.ts` as of 2026-09-14). Nothing in code reads this file yet — it's the reference a person uses by hand during the Room Content pass (filling in each locked/trapped/stuck door's actual content note). If that pass ever gets automated, this is the table it should read ([[Locks & Traps Content Plan]] owns that `parseLockTrapRules()` plan).
+Keys off a floor's `Level` (the row in `Floor N Setup.md`). "Generate Random Map" reads this file each time it writes the door notes in `Floor N/Doors/`, so edits here take effect on the next generated map ([[Locks & Traps Content Plan]] covers the reader, `parseLockTrapRules()`).
 
 3.5e-based, and a **starting point** in the same spirit as `GenerateConfig`'s door-roll weights (`lockedDoorChance` etc.) — not tuned against real play yet. Sanity-check against the DMG's own Trap Design guidelines before treating any single number as gospel, and retune freely.
 
@@ -10,20 +10,20 @@ Keys off a floor's `Level` (the row in `Floor N Setup.md`, parsed by `src/floorS
 
 ## Locked doors — Open Lock DC
 
-Straight from the 3.5e SRD's lock-quality tiers, bucketed evenly across floor levels 1–20:
+**Open Lock DC = Floor Level + Base + Die**, rolled separately for each locked door. With the values below a Level 1 floor's locks run DC 22–31, Level 4 runs 25–34, Level 10 runs 31–40 and Level 20 runs 41–50.
 
-| Floor Level | Lock Quality | Open Lock DC |
-| --- | --- | --- |
-| 1–5   | Very simple | 20 |
-| 6–10  | Average     | 25 |
-| 11–15 | Good        | 30 |
-| 16–20 | Superior    | 40 |
+| Open Lock DC | Value |
+| --- | --- |
+| Base | 20 |
+| Die | 1d10 |
+
+Changed 2026-10-04. Before that this was the 3.5e SRD's lock-quality tiers by floor level (DC 20 for floors 1–5, 25 for 6–10, 30 for 11–15, 40 for 16–20), which ran low and gave every lock on a floor the same DC.
 
 ---
 
 ## Trapped doors — Search / Disable Device DC
 
-Homebrew straight-line approximation, **not** a verbatim DMG table: treats the trap's CR as equal to the floor's Level (the DMG's own "a trap of CR X is a fair challenge for level X" guidance), then approximates Search DC = Disable Device DC = 19 + Level.
+Doors no longer roll traps (2026-10-03); this table only applies to a door marked `trapped` by hand. Homebrew straight-line approximation, **not** a verbatim DMG table: treats the trap's CR as equal to the floor's Level (the DMG's own "a trap of CR X is a fair challenge for level X" guidance), then approximates Search DC = Disable Device DC = 19 + Level.
 
 | Floor Level | Search / Disable Device DC |
 | --- | --- |
